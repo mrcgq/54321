@@ -1,6 +1,7 @@
 # GitHub Actions Workflow 的名称
-name: Build Xlink Windows Client (Debug)
+name: Build Xlink Windows Client (Release)
 
+# 触发工作流程的事件
 on:
   push:
     branches: [ "main" ]
@@ -8,6 +9,7 @@ on:
     types: [published]
   workflow_dispatch:
 
+# 定义工作流程中的任务 (Jobs)
 jobs:
   build:
     runs-on: windows-latest
@@ -30,26 +32,29 @@ jobs:
       - name: Install Wails CLI
         run: go install github.com/wailsapp/wails/v2/cmd/wails@latest
 
-      # ⚠️【关键修改】使用 -debug 开启调试模式，允许右键审查元素
-      # 移除了 -ldflags "-H windowsgui" 以便在开发阶段排错
+      # ⚠️【关键修改】切换回生产模式构建
+      # -H windowsgui: 隐藏黑色的控制台窗口
+      # -s -w: 减小体积，去除调试符号
       - name: Build Wails application
-        run: wails build -platform windows/amd64 -debug
+        run: wails build -platform windows/amd64 -ldflags "-H windowsgui -s -w"
 
       - name: Prepare packaging resources
         run: |
           if (-not (Test-Path release)) { mkdir release }
           Copy-Item build/bin/xlink-client.exe -Destination release/
           
-          # 注意：请确保您后续填入真实的内核下载链接，否则程序只有界面无法连接
+          # 注意：为了让软件能用，请在这里填入内核文件的下载链接，或者构建完自己手动放进去
           echo "Downloading runtime resources (Skipped)..."
-          # iwr ... (下载命令略)
+          
+          echo "Listing files in release folder:"
+          ls release/
 
       - name: Create ZIP archive
         run: |
-          Compress-Archive -Path release\* -DestinationPath xlink-client-windows-amd64-debug.zip
+          Compress-Archive -Path release\* -DestinationPath xlink-client-windows-amd64.zip
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: xlink-client-windows-amd64-debug
-          path: xlink-client-windows-amd64-debug.zip
+          name: xlink-client-windows-amd64
+          path: xlink-client-windows-amd64.zip

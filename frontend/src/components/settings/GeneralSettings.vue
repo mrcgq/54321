@@ -159,26 +159,25 @@ const emit = defineEmits<{
 
 const appStore = useAppStore()
 
-const theme = ref<'light' | 'dark' | 'system'>('system')
+// 定义 Theme 类型
+type Theme = 'light' | 'dark' | 'system'
+
+const theme = ref<Theme>('system')
 const autoStart = ref(false)
 const minimizeToTray = ref(true)
 
-const themes = [
+// 【修复 1】显式声明数组类型，解决模板中 theme = t.value 的类型报错
+const themes: { value: Theme; label: string }[] = [
   { value: 'light', label: '浅色' },
   { value: 'dark', label: '深色' },
   { value: 'system', label: '跟随系统' }
 ]
 
-
-
-
-
-
 onMounted(async () => {
   try {
-	const settings = await window.go.main.App.GetSettings()
-    // 使用 'as' 强制告诉编译器这个字符串是合法的
-    theme.value = (settings.theme as 'light' | 'dark' | 'system') || 'system'
+    const settings = await window.go.main.App.GetSettings()
+    // 【修复 2】保留类型断言，防止后端返回值类型检查失败
+    theme.value = (settings.theme as Theme) || 'system'
     autoStart.value = settings.auto_start || false
     minimizeToTray.value = settings.minimize_to_tray !== false
   } catch (e) {

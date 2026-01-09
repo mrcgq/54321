@@ -4,11 +4,14 @@ package main
 import (
 	"context"
 	"fmt"
+	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 
+	"xlink-wails/internal/config"
 	"xlink-wails/internal/models"
 )
 
@@ -16,6 +19,9 @@ import (
 type App struct {
 	ctx   context.Context
 	state *models.AppState
+
+	// 配置管理器 [步骤2新增]
+	configManager *config.Manager
 
 	// 日志缓冲
 	logBuffer   []models.LogEntry
@@ -38,11 +44,14 @@ func NewApp() *App {
 // 生命周期方法
 // =============================================================================
 
-// startup 应用启动时调用
+// startup 应用启动时调用 [步骤2修改]
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
 
-	// 加载配置（步骤2实现）
+	// 初始化配置管理器 [步骤2新增]
+	a.configManager = config.NewManager(a.state.ExeDir)
+
+	// 加载配置
 	a.loadConfig()
 
 	// 如果是自动启动，启动所有节点
@@ -389,7 +398,7 @@ func (a *App) DeleteRule(nodeID, ruleID string) error {
 }
 
 // =============================================================================
-// 导入导出 API
+// 导入导出 API [步骤2完整实现]
 // =============================================================================
 
 // ImportFromClipboard 从剪贴板导入
@@ -399,23 +408,91 @@ func (a *App) ImportFromClipboard() (int, error) {
 		return 0, fmt.Errorf("读取剪贴板失败: %v", err)
 	}
 
-	// TODO: 步骤9实现解析逻辑
-	_ = text
-
-	return 0, nil
-}
-
-// ExportToClipboard 导出到剪贴板
-func (a *App) ExportToClipboard(id string) error {
-	node := a.state.GetNode(id)
-	if node == nil {
-		return fmt.Errorf("节点不存在: %s", id)
+	imported, err := a.configManager.ImportNodes(text)
+	if err != nil {
+		return 0, err
 	}
 
-	// TODO: 步骤9实现导出逻辑
-	uri := fmt.Sprintf("xlink://%s@%s", node.Token, node.Server)
+	// 更新状态
+	a.state.mu.Lock()
+	a.state.Config = a.configManager.GetConfig()
+	a.state.mu.Unlock()
 
-	return runtime.ClipboardSetText(a.ctx, uri)
+	// 保存并通知前端
+	go a.saveConfig()
+	a.emitEvent(models.EventConfigChanged, nil)
+
+	a.appendSystemLog("info", "系统", fmt.Sprintf("成功导入 %d 个节点", len(imported)))
+
+	return len(imported), nil
+}
+
+// ExportToClipboard 导出节点到剪贴板
+func (a *App) ExportToClipboard(id string) error {
+	uri, err := a.configManager.ExportNode(id)
+	if err != nil {
+		return err
+	}
+
+	if err := runtime.ClipboardSetText(a.ctx, uri); err != nil {
+		return fmt.Errorf("写入剪贴板失败: %v", err)
+	}
+
+	a.appendSystemLog("info", "系统", "配置已复制到剪贴板")
+	return nil
+}
+
+// ExportAllToClipboard 导出所有节点到剪贴板 [步骤2新增]
+func (a *App) ExportAllToClipboard() error {
+	a.state.mu.RLock()
+	nodes := a.state.Config.Nodes
+	a.state.mu.RUnlock()
+
+	var uris []string
+	for _, node := range nodes {
+		uri, err := a.configManager.ExportNode(node.ID)
+		if err == nil {
+			uris = append(uris, uri)
+		}
+	}
+
+	if len(uris) == 0 {
+		return fmt.Errorf("没有可导出的节点")
+	}
+
+	text := strings.Join(uris, "\n")
+	if err := runtime.ClipboardSetText(a.ctx, text); err != nil {
+		return fmt.Errorf("写入剪贴板失败: %v", err)
+	}
+
+	a.appendSystemLog("info", "系统", fmt.Sprintf("已导出 %d 个节点到剪贴板", len(uris)))
+	return nil
+}
+
+// =============================================================================
+// 备份管理 API [步骤2新增]
+// =============================================================================
+
+// ListBackups 列出所有备份
+func (a *App) ListBackups() []string {
+	return a.configManager.ListBackups()
+}
+
+// RestoreBackup 从备份恢复
+func (a *App) RestoreBackup(backupName string) error {
+	if err := a.configManager.RestoreBackup(backupName); err != nil {
+		return err
+	}
+
+	// 重新加载配置
+	a.state.mu.Lock()
+	a.state.Config = a.configManager.GetConfig()
+	a.state.mu.Unlock()
+
+	a.emitEvent(models.EventConfigChanged, nil)
+	a.appendSystemLog("info", "系统", fmt.Sprintf("已从备份恢复: %s", backupName))
+
+	return nil
 }
 
 // =============================================================================
@@ -430,11 +507,11 @@ func (a *App) GetSettings() models.AppConfig {
 }
 
 // UpdateSettings 更新应用设置
-func (a *App) UpdateSettings(config models.AppConfig) error {
+func (a *App) UpdateSettings(cfg models.AppConfig) error {
 	a.state.mu.Lock()
 	// 保留节点列表
-	config.Nodes = a.state.Config.Nodes
-	a.state.Config = &config
+	cfg.Nodes = a.state.Config.Nodes
+	a.state.Config = &cfg
 	a.state.mu.Unlock()
 
 	go a.saveConfig()
@@ -457,6 +534,20 @@ func (a *App) GetAutoStart() bool {
 	a.state.mu.RLock()
 	defer a.state.mu.RUnlock()
 	return a.state.Config.AutoStart
+}
+
+// =============================================================================
+// 配置文件路径 API [步骤2新增]
+// =============================================================================
+
+// GetConfigPath 获取配置文件路径
+func (a *App) GetConfigPath() string {
+	return filepath.Join(a.state.ExeDir, config.ConfigFileName)
+}
+
+// OpenConfigFolder 打开配置文件所在文件夹
+func (a *App) OpenConfigFolder() error {
+	return runtime.BrowserOpenURL(a.ctx, a.state.ExeDir)
 }
 
 // =============================================================================
@@ -571,20 +662,40 @@ func (a *App) emitNodeStatus(nodeID, status string) {
 }
 
 // =============================================================================
-// 配置持久化（占位，步骤2实现）
+// 配置持久化 [步骤2完整实现]
 // =============================================================================
 
+// loadConfig 加载配置
 func (a *App) loadConfig() {
-	// 如果没有节点，创建默认节点
-	if len(a.state.Config.Nodes) == 0 {
-		a.state.Config.Nodes = []models.NodeConfig{
-			models.NewDefaultNode("默认节点"),
+	cfg, err := a.configManager.Load()
+	if err != nil {
+		a.appendSystemLog("error", "系统", fmt.Sprintf("加载配置失败: %v", err))
+		// 使用默认配置
+		cfg = &models.AppConfig{
+			Nodes: []models.NodeConfig{
+				models.NewDefaultNode("默认节点"),
+			},
+			Theme:    "system",
+			Language: "zh-CN",
 		}
 	}
+
+	a.state.mu.Lock()
+	a.state.Config = cfg
+	a.state.mu.Unlock()
+
+	a.appendSystemLog("info", "系统", fmt.Sprintf("已加载 %d 个节点配置", len(cfg.Nodes)))
 }
 
+// saveConfig 保存配置
 func (a *App) saveConfig() {
-	// 步骤2实现
+	a.state.mu.RLock()
+	a.configManager.UpdateConfig(a.state.Config)
+	a.state.mu.RUnlock()
+
+	if err := a.configManager.Save(); err != nil {
+		a.appendSystemLog("error", "系统", fmt.Sprintf("保存配置失败: %v", err))
+	}
 }
 
 // =============================================================================

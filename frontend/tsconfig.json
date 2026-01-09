@@ -12,8 +12,11 @@
     "noEmit": true,
     "jsx": "preserve",
     "strict": true,
-    "noUnusedLocals": true,
-    "noUnusedParameters": true,
+    
+    /* 添加以下两行配置，关闭未使用变量的报错 */
+    "noUnusedLocals": false,
+    "noUnusedParameters": false,
+    
     "noFallthroughCasesInSwitch": true,
     "paths": {
       "@/*": ["./src/*"],

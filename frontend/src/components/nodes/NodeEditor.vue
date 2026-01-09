@@ -14,7 +14,6 @@
       </div>
       
       <div class="flex items-center gap-2">
-        <!-- ⚠️ 关键：手动保存按钮 -->
         <button @click="saveNode" class="btn-primary text-sm">保存配置</button>
         <button @click="exportNode" class="btn-secondary text-sm">导出</button>
         <button v-if="status !== 'running'" @click="startNode" class="btn-success text-sm">启动</button>
@@ -22,31 +21,32 @@
       </div>
     </div>
     
-    <!-- Config Form (移除自动保存) -->
+    <!-- Config Form -->
     <div class="p-6 space-y-6 max-h-[calc(100vh-400px)] overflow-y-auto">
       <section>
         <h4 class="text-sm font-medium text-gray-700 dark:text-gray-300 mb-4">基本配置</h4>
         <div class="grid grid-cols-2 gap-4">
           <div>
             <label class="block text-sm text-gray-600 dark:text-gray-400 mb-1">本地监听</label>
-            <input v-model="localNode.listen" type="text" class="input-base" />
+            <!-- 移除 .lazy，恢复实时响应，防止数据丢失 -->
+            <input v-model="localNode.listen" type="text" class="input-base" @change="saveNode" />
           </div>
           <div>
             <label class="block text-sm text-gray-600 dark:text-gray-400 mb-1">全局指定 IP</label>
-            <input v-model="localNode.ip" type="text" class="input-base" />
+            <input v-model="localNode.ip" type="text" class="input-base" @change="saveNode" />
           </div>
         </div>
         <div class="mt-4">
           <label class="block text-sm text-gray-600 dark:text-gray-400 mb-1">服务器地址池</label>
-          <textarea v-model="localNode.server" rows="3" class="input-base font-mono text-sm resize-none"></textarea>
+          <textarea v-model="localNode.server" rows="3" class="input-base font-mono text-sm resize-none" @change="saveNode"></textarea>
         </div>
         <div class="grid grid-cols-2 gap-4 mt-4">
-          <div><label class="block text-sm text-gray-600 dark:text-gray-400 mb-1">Token</label><input v-model="localNode.token" type="password" class="input-base" /></div>
-          <div><label class="block text-sm text-gray-600 dark:text-gray-400 mb-1">Secret Key</label><input v-model="localNode.secret_key" type="password" class="input-base" /></div>
+          <div><label class="block text-sm text-gray-600 dark:text-gray-400 mb-1">Token</label><input v-model="localNode.token" type="password" class="input-base" @change="saveNode" /></div>
+          <div><label class="block text-sm text-gray-600 dark:text-gray-400 mb-1">Secret Key</label><input v-model="localNode.secret_key" type="password" class="input-base" @change="saveNode" /></div>
         </div>
         <div class="grid grid-cols-2 gap-4 mt-4">
-          <div><label class="block text-sm text-gray-600 dark:text-gray-400 mb-1">回源 IP</label><input v-model="localNode.fallback_ip" type="text" class="input-base" /></div>
-          <div><label class="block text-sm text-gray-600 dark:text-gray-400 mb-1">上游 SOCKS5</label><input v-model="localNode.socks5" type="text" class="input-base" /></div>
+          <div><label class="block text-sm text-gray-600 dark:text-gray-400 mb-1">回源 IP</label><input v-model="localNode.fallback_ip" type="text" class="input-base" @change="saveNode" /></div>
+          <div><label class="block text-sm text-gray-600 dark:text-gray-400 mb-1">上游 SOCKS5</label><input v-model="localNode.socks5" type="text" class="input-base" @change="saveNode" /></div>
         </div>
       </section>
       
@@ -55,14 +55,14 @@
         <div class="grid grid-cols-2 gap-4">
           <div>
             <label class="block text-sm text-gray-600 dark:text-gray-400 mb-1">路由模式</label>
-            <select v-model="localNode.routing_mode" class="input-base">
+            <select v-model="localNode.routing_mode" class="input-base" @change="saveNode">
               <option :value="0">全局代理</option>
               <option :value="1">智能分流</option>
             </select>
           </div>
           <div>
             <label class="block text-sm text-gray-600 dark:text-gray-400 mb-1">负载策略</label>
-            <select v-model="localNode.strategy_mode" class="input-base">
+            <select v-model="localNode.strategy_mode" class="input-base" @change="saveNode">
               <option :value="0">随机</option>
               <option :value="1">轮询</option>
               <option :value="2">哈希</option>
@@ -76,7 +76,7 @@
         <div class="grid grid-cols-2 gap-4">
           <div>
             <label class="block text-sm text-gray-600 dark:text-gray-400 mb-1">DNS 模式</label>
-            <select v-model="localNode.dns_mode" class="input-base">
+            <select v-model="localNode.dns_mode" class="input-base" @change="saveNode">
               <option :value="0">标准</option>
               <option :value="1">Fake-IP</option>
               <option :value="2">TUN</option>
@@ -84,7 +84,7 @@
           </div>
           <div class="flex items-center">
             <label class="flex items-center gap-2 cursor-pointer">
-              <input v-model="localNode.enable_sniffing" type="checkbox" class="w-4 h-4 text-primary-600 rounded" />
+              <input v-model="localNode.enable_sniffing" type="checkbox" class="w-4 h-4 text-primary-600 rounded" @change="saveNode" />
               <span class="text-sm text-gray-600 dark:text-gray-400">启用流量嗅探</span>
             </label>
           </div>
@@ -105,7 +105,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, computed } from 'vue'
+import { ref, onMounted, computed, watch } from 'vue'
 import { useAppStore } from '@/stores/app'
 import { useNodesStore } from '@/stores/nodes'
 import type { NodeConfig, RoutingRule } from '@/types'
@@ -127,10 +127,10 @@ const editingRule = ref<RoutingRule | null>(null)
 
 const status = computed(() => nodesStore.getNodeStatus(props.nodeId))
 
-// ⚠️ 初始化：独立获取数据
-onMounted(async () => {
-  await fetchNodeData()
-})
+// 监听 ID 变化，切换节点时拉取新数据
+watch(() => props.nodeId, async (newId) => {
+  if (newId) await fetchNodeData()
+}, { immediate: true })
 
 async function fetchNodeData() {
   loading.value = true
@@ -148,8 +148,9 @@ async function fetchNodeData() {
 }
 
 async function saveNode() {
+  // 保存到后端
   await nodesStore.updateNode(localNode.value)
-  appStore.showToast('success', '已保存')
+  // 不弹窗提示，避免输入时频繁打扰
 }
 
 function editName() {
@@ -165,7 +166,15 @@ async function exportNode() {
   appStore.showToast('success', '已复制')
 }
 
-async function startNode() { await nodesStore.startNode(props.nodeId) }
+// ⚠️ 关键修改：启动前强制保存
+async function startNode() { 
+  // 1. 先保存当前界面上的配置到后端
+  await saveNode()
+  // 2. 然后再通知后端启动
+  await nodesStore.startNode(props.nodeId) 
+  appStore.showToast('success', '已启动')
+}
+
 async function stopNode() { await nodesStore.stopNode(props.nodeId) }
 
 function editRule(rule: RoutingRule) {
@@ -176,8 +185,10 @@ function editRule(rule: RoutingRule) {
 async function deleteRule(ruleId: string) {
   if(!confirm("删除?")) return
   await nodesStore.deleteRule(props.nodeId, ruleId)
-  // 手动更新本地视图规则
-  localNode.value.rules = localNode.value.rules.filter(r => r.id !== ruleId)
+  // 手动更新本地视图
+  if (localNode.value.rules) {
+    localNode.value.rules = localNode.value.rules.filter(r => r.id !== ruleId)
+  }
 }
 
 async function saveRule(rule: RoutingRule) {
@@ -187,7 +198,7 @@ async function saveRule(rule: RoutingRule) {
     await nodesStore.addRule(props.nodeId, rule)
   }
   closeRuleDialog()
-  // 重新获取数据以保证一致性
+  // 重新拉取以保持一致
   await fetchNodeData()
   appStore.showToast('success', '规则已保存')
 }

@@ -40,9 +40,6 @@
       <!-- 基本配置 -->
       <section>
         <h4 class="text-sm font-medium text-gray-700 dark:text-gray-300 mb-4 flex items-center gap-2">
-          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
-          </svg>
           基本配置
         </h4>
         
@@ -135,9 +132,6 @@
       <!-- 路由配置 -->
       <section>
         <h4 class="text-sm font-medium text-gray-700 dark:text-gray-300 mb-4 flex items-center gap-2">
-          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 20l-5.447-2.724A1 1 0 013 16.382V5.618a1 1 0 011.447-.894L9 7m0 13l6-3m-6 3V7m6 10l4.553 2.276A1 1 0 0021 18.382V7.618a1 1 0 00-.553-.894L15 4m0 13V4m0 0L9 7" />
-          </svg>
           路由配置
         </h4>
         
@@ -164,9 +158,6 @@
       <!-- DNS 防泄露 -->
       <section>
         <h4 class="text-sm font-medium text-gray-700 dark:text-gray-300 mb-4 flex items-center gap-2">
-          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
-          </svg>
           DNS 防泄露
         </h4>
         
@@ -204,9 +195,6 @@
       <section>
         <div class="flex items-center justify-between mb-4">
           <h4 class="text-sm font-medium text-gray-700 dark:text-gray-300 flex items-center gap-2">
-            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h7" />
-            </svg>
             分流规则
             <span class="text-gray-400 font-normal">({{ localNode.rules?.length || 0 }})</span>
           </h4>
@@ -249,24 +237,32 @@ const props = defineProps<{
 const appStore = useAppStore()
 const nodesStore = useNodesStore()
 
-// 【修复关键点】使用深拷贝初始化，断开与 Store 的响应式连接
-const localNode = ref<NodeConfig>(JSON.parse(JSON.stringify(props.node)))
+// 初始化本地数据 (深拷贝)
+function cloneNode(n: NodeConfig): NodeConfig {
+  try {
+    return JSON.parse(JSON.stringify(n))
+  } catch (e) {
+    console.error('Clone node failed', e)
+    return { ...n }
+  }
+}
 
+const localNode = ref<NodeConfig>(cloneNode(props.node))
 const showRuleDialog = ref(false)
 const editingRule = ref<RoutingRule | null>(null)
 
 const status = computed(() => nodesStore.getNodeStatus(props.node.id))
 
-// 【修复关键点】监听 props 变化时，同样使用深拷贝更新
-watch(() => props.node, (newNode) => {
-  // 只有当 ID 变化时才更新，避免自身 updateNode 触发的循环
-  if (newNode.id !== localNode.value.id) {
-    localNode.value = JSON.parse(JSON.stringify(newNode))
-  }
-}, { deep: true })
+// ⚠️【关键修复】只监听 props.node.id 的变化
+// 当且仅当用户切换节点时，才重新初始化 localNode
+// 这样就切断了 updateNode -> props 更新 -> watcher 触发 -> localNode 更新 的死循环
+watch(() => props.node.id, () => {
+  localNode.value = cloneNode(props.node)
+})
 
 async function saveNode() {
   try {
+    // 提交更新到 Store 和 后端
     await nodesStore.updateNode(localNode.value)
   } catch (e: any) {
     appStore.showToast('error', e.message)
@@ -318,7 +314,12 @@ async function deleteRule(ruleId: string) {
   
   try {
     await nodesStore.deleteRule(props.node.id, ruleId)
-    // 重新获取数据会更新 props.node，进而更新 localNode
+    // 规则删除后，props.node 会更新
+    // 我们需要手动同步更新 localNode 的规则部分，或者等待 ID 切换
+    // 但因为我们取消了 deep watch，这里需要手动刷新一下 localNode
+    // 更好的方式是直接从 store 重新拉取
+    localNode.value = cloneNode(nodesStore.nodes.find(n => n.id === props.node.id) || props.node)
+    
     appStore.showToast('success', '规则已删除')
   } catch (e: any) {
     appStore.showToast('error', e.message)
@@ -333,6 +334,9 @@ async function saveRule(rule: RoutingRule) {
       await nodesStore.addRule(props.node.id, rule)
     }
     closeRuleDialog()
+    // 同步更新本地状态
+    localNode.value = cloneNode(nodesStore.nodes.find(n => n.id === props.node.id) || props.node)
+    
     appStore.showToast('success', '规则已保存')
   } catch (e: any) {
     appStore.showToast('error', e.message)

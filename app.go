@@ -242,7 +242,7 @@ func (a *App) AddNode(name string) (*models.NodeConfig, error) {
 
 	// 异步保存并通知前端
 	go a.saveConfig()
-	a.emitEvent(models.EventConfigChanged, nil)
+	//a.emitEvent(models.EventConfigChanged, nil)
 
 	return &node, nil
 }

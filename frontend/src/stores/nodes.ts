@@ -30,12 +30,14 @@ declare const window: {
 }
 
 export const useNodesStore = defineStore('nodes', () => {
+  // 状态
   const nodes = ref<NodeConfig[]>([])
   const currentNodeId = ref<string | null>(null)
   const statuses = ref<Record<string, EngineStatus>>({})
   const isLoading = ref(false)
   const error = ref<string | null>(null)
 
+  // 计算属性
   const currentNode = computed(() => {
     if (!currentNodeId.value) return null
     return nodes.value.find(n => n.id === currentNodeId.value) || null
@@ -50,17 +52,21 @@ export const useNodesStore = defineStore('nodes', () => {
 
   const hasRunningNodes = computed(() => runningNodes.value.length > 0)
 
+  // 方法
   async function fetchNodes() {
     isLoading.value = true
+    error.value = null
+    
     try {
-      // 这里的 GetNodes 只是获取数据，不会触发保存，是安全的
       nodes.value = await window.go.main.App.GetNodes()
       await fetchStatuses()
+      
+      // 如果没有选中节点，选中第一个
       if (!currentNodeId.value && nodes.value.length > 0) {
         currentNodeId.value = nodes.value[0].id
       }
     } catch (e: any) {
-      console.error(e)
+      error.value = e.message || '加载节点失败'
     } finally {
       isLoading.value = false
     }
@@ -69,32 +75,37 @@ export const useNodesStore = defineStore('nodes', () => {
   async function fetchStatuses() {
     try {
       statuses.value = await window.go.main.App.GetAllNodeStatuses()
-    } catch (e) {}
+    } catch (e) {
+      // ignore
+    }
   }
 
   function selectNode(id: string) {
     currentNodeId.value = id
   }
 
-  async function addNode(name: string) {
+  async function addNode(name: string = '新节点') {
     const node = await window.go.main.App.AddNode(name)
+    // 增删操作必须刷新列表，因为列表长度变了
     await fetchNodes()
     currentNodeId.value = node.id
     return node
   }
 
-  // ⚠️【绝对死循环阻断】⚠️
-  // 这个函数现在只做一件事：告诉后端保存。
-  // 绝对不要在这里更新 nodes.value，绝对不要在这里调用 fetchNodes。
+  // ⚠️【核心修复】updateNode 只负责向后端发送保存请求
+  // 绝对不要在这里修改 nodes.value，也绝对不要调用 fetchNodes
+  // 这样就切断了前端死循环的源头
   async function updateNode(node: NodeConfig) {
     await window.go.main.App.UpdateNode(node)
-    // 结束。不要做任何其他操作。
+    // 结束。不做任何其他操作。
   }
 
   async function deleteNode(id: string) {
     await window.go.main.App.DeleteNode(id)
-    await fetchNodes() // 删除操作不频繁，可以刷新
-    if (currentNodeId.value === id) currentNodeId.value = null
+    await fetchNodes()
+    if (currentNodeId.value === id) {
+      currentNodeId.value = nodes.value[0]?.id || null
+    }
   }
 
   async function duplicateNode(id: string) {
@@ -146,10 +157,13 @@ export const useNodesStore = defineStore('nodes', () => {
 
   async function importNodes() {
     const count = await window.go.main.App.ImportFromClipboard()
-    if (count > 0) await fetchNodes()
+    if (count > 0) {
+      await fetchNodes()
+    }
     return count
   }
   
+  // 规则操作
   async function addRule(nodeId: string, rule: any) {
     await window.go.main.App.AddRule(nodeId, rule);
     // 规则变动不频繁，允许刷新

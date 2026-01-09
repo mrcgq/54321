@@ -30,7 +30,7 @@ const (
 	StartTimeout = 10 * time.Second
 
 	// 进程停止超时
-	StopTimeout = 5 * time.Second
+	StopTimeout = 2 * time.Second // 缩短超时，加速停止反馈
 
 	// 健康检查间隔
 	HealthCheckInterval = 5 * time.Second
@@ -121,10 +121,13 @@ func (m *Manager) StartNode(node *models.NodeConfig, configPath string) error {
 	if inst, exists := m.instances[node.ID]; exists {
 		if inst.Status == models.StatusRunning {
 			m.mu.Unlock()
-			return fmt.Errorf("节点已在运行中")
+			// 如果已经在运行，先不报错，尝试停止再启动（重启逻辑）
+			m.stopInstanceLocked(node.ID)
+			m.mu.Lock() // 重新加锁
+		} else {
+			// 清理旧实例
+			m.stopInstanceLocked(node.ID)
 		}
-		// 清理旧实例
-		m.stopInstanceLocked(node.ID)
 	}
 
 	// 创建新实例
@@ -152,10 +155,7 @@ func (m *Manager) StartNode(node *models.NodeConfig, configPath string) error {
 
 	// 启动Xlink核心
 	if err := m.startXlinkProcess(instance, node, configPath); err != nil {
-		instance.mu.Lock()
-		instance.Status = models.StatusError
-		instance.mu.Unlock()
-		instance.StatusCallback(models.StatusError, err)
+		m.cleanupInstance(instance, err)
 		return err
 	}
 
@@ -165,10 +165,7 @@ func (m *Manager) StartNode(node *models.NodeConfig, configPath string) error {
 		if err := m.startXrayProcess(instance, xrayConfigPath); err != nil {
 			// 停止已启动的Xlink
 			m.stopXlinkProcess(instance)
-			instance.mu.Lock()
-			instance.Status = models.StatusError
-			instance.mu.Unlock()
-			instance.StatusCallback(models.StatusError, err)
+			m.cleanupInstance(instance, err)
 			return err
 		}
 	}
@@ -185,29 +182,37 @@ func (m *Manager) StartNode(node *models.NodeConfig, configPath string) error {
 	return nil
 }
 
+// cleanupInstance 启动失败时的清理
+func (m *Manager) cleanupInstance(inst *EngineInstance, err error) {
+	inst.mu.Lock()
+	inst.Status = models.StatusError
+	inst.mu.Unlock()
+	inst.StatusCallback(models.StatusError, err)
+	
+	m.mu.Lock()
+	delete(m.instances, inst.NodeID)
+	m.mu.Unlock()
+}
+
 // startXlinkProcess 启动Xlink核心进程
 func (m *Manager) startXlinkProcess(inst *EngineInstance, node *models.NodeConfig, configPath string) error {
 	xlinkPath := filepath.Join(m.exeDir, XlinkBinaryName)
 
-	// 检查可执行文件
 	if _, err := os.Stat(xlinkPath); os.IsNotExist(err) {
 		return fmt.Errorf("核心文件不存在: %s", XlinkBinaryName)
 	}
 
-	// 构建命令行参数
-	args := []string{"-c", configPath}
+	// 解决 Windows 下路径空格问题，尽量使用绝对路径
+	absConfigPath, _ := filepath.Abs(configPath)
+	args := []string{"-c", absConfigPath}
 
-	// 创建上下文
 	ctx, cancel := context.WithCancel(context.Background())
 
-	// 创建进程
 	cmd := exec.CommandContext(ctx, xlinkPath, args...)
 	cmd.Dir = m.exeDir
 
-	// 隐藏窗口（Windows）
 	m.hideWindow(cmd)
 
-	// 创建管道
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		cancel()
@@ -220,7 +225,6 @@ func (m *Manager) startXlinkProcess(inst *EngineInstance, node *models.NodeConfi
 		return fmt.Errorf("创建stderr管道失败: %w", err)
 	}
 
-	// 启动进程
 	if err := cmd.Start(); err != nil {
 		cancel()
 		return fmt.Errorf("启动Xlink进程失败: %w", err)
@@ -237,11 +241,8 @@ func (m *Manager) startXlinkProcess(inst *EngineInstance, node *models.NodeConfi
 	}
 	inst.mu.Unlock()
 
-	// 启动日志读取
 	go m.readProcessOutput(inst, "xlink", stdout)
 	go m.readProcessOutput(inst, "xlink", stderr)
-
-	// 等待进程退出
 	go m.waitProcess(inst, "xlink", cmd)
 
 	inst.LogCallback("info", "系统", fmt.Sprintf("Xlink核心已启动 (PID: %d)", cmd.Process.Pid))
@@ -253,18 +254,12 @@ func (m *Manager) startXlinkProcess(inst *EngineInstance, node *models.NodeConfi
 func (m *Manager) startXrayProcess(inst *EngineInstance, configPath string) error {
 	xrayPath := filepath.Join(m.exeDir, XrayBinaryName)
 
-	// 检查可执行文件
 	if _, err := os.Stat(xrayPath); os.IsNotExist(err) {
-		return fmt.Errorf("Xray文件不存在: %s（智能分流模式需要此文件）", XrayBinaryName)
+		return fmt.Errorf("Xray文件不存在: %s", XrayBinaryName)
 	}
 
-	// 检查配置文件
-	if _, err := os.Stat(configPath); os.IsNotExist(err) {
-		return fmt.Errorf("Xray配置文件不存在: %s", configPath)
-	}
-
-	// 构建命令行
-	args := []string{"run", "-c", configPath}
+	absConfigPath, _ := filepath.Abs(configPath)
+	args := []string{"run", "-c", absConfigPath}
 
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -330,21 +325,23 @@ func (m *Manager) stopInstanceLocked(nodeID string) error {
 	}
 
 	inst.mu.Lock()
-	defer inst.mu.Unlock()
-
-	// 停止Xray
+	
+	// 先标记状态，防止 UI 闪烁
+	inst.Status = models.StatusStopped
+	
+	// 停止 Xray
 	if inst.XrayProcess != nil {
 		m.terminateProcess(inst.XrayProcess)
 		inst.XrayProcess = nil
 	}
 
-	// 停止Xlink
+	// 停止 Xlink
 	if inst.XlinkProcess != nil {
 		m.terminateProcess(inst.XlinkProcess)
 		inst.XlinkProcess = nil
 	}
-
-	inst.Status = models.StatusStopped
+	
+	inst.mu.Unlock()
 
 	// 通知状态变更
 	if inst.StatusCallback != nil {
@@ -355,6 +352,7 @@ func (m *Manager) stopInstanceLocked(nodeID string) error {
 		go inst.LogCallback("info", "系统", "节点已停止")
 	}
 
+	// 从 map 中移除
 	delete(m.instances, nodeID)
 
 	return nil
@@ -370,39 +368,30 @@ func (m *Manager) StopAll() {
 	}
 }
 
-// terminateProcess 终止进程
+// terminateProcess 终止进程 (核心修复)
 func (m *Manager) terminateProcess(proc *ProcessInfo) {
 	if proc == nil || proc.Cmd == nil || proc.Cmd.Process == nil {
 		return
 	}
 
-	// 取消上下文
+	// 1. 先尝试取消 Context (发送信号)
 	if proc.Cancel != nil {
 		proc.Cancel()
 	}
 
-	// 关闭管道
-	if proc.StdoutPipe != nil {
-		proc.StdoutPipe.Close()
-	}
-	if proc.StderrPipe != nil {
-		proc.StderrPipe.Close()
-	}
+	// 2. 关闭管道，防止IO阻塞
+	if proc.StdoutPipe != nil { proc.StdoutPipe.Close() }
+	if proc.StderrPipe != nil { proc.StderrPipe.Close() }
 
-	// 尝试优雅终止
-	done := make(chan struct{})
-	go func() {
-		proc.Cmd.Wait()
-		close(done)
-	}()
-
-	select {
-	case <-done:
-		// 进程已退出
-	case <-time.After(StopTimeout):
-		// 强制终止
+	// 3. ⚠️【关键修复】调用平台特定的强制终止方法 (taskkill / kill)
+	// 之前这里只调用了 proc.Cmd.Process.Kill()，在 Windows 上经常杀不掉
+	if err := m.killProcessTree(proc.Pid); err != nil {
+		// 如果 killProcessTree 失败，兜底调用 Go 原生 Kill
 		proc.Cmd.Process.Kill()
 	}
+	
+	// 4. 释放资源
+	proc.Cmd.Wait()
 }
 
 // =============================================================================
@@ -412,7 +401,6 @@ func (m *Manager) terminateProcess(proc *ProcessInfo) {
 // readProcessOutput 读取进程输出
 func (m *Manager) readProcessOutput(inst *EngineInstance, source string, reader io.Reader) {
 	scanner := bufio.NewScanner(reader)
-	// 增大缓冲区
 	buf := make([]byte, 64*1024)
 	scanner.Buffer(buf, 1024*1024)
 
@@ -421,8 +409,6 @@ func (m *Manager) readProcessOutput(inst *EngineInstance, source string, reader 
 		if line == "" {
 			continue
 		}
-
-		// 解析并转发日志
 		m.parseAndForwardLog(inst, source, line)
 	}
 }
@@ -437,37 +423,31 @@ func (m *Manager) parseAndForwardLog(inst *EngineInstance, source, line string) 
 	category := "内核"
 	message := line
 
-	// 解析日志级别和类别
-	switch {
-	case strings.Contains(line, "[ERR]") || strings.Contains(line, "error") || strings.Contains(line, "Error"):
+	// 简单解析日志级别
+	lowerLine := strings.ToLower(line)
+	if strings.Contains(lowerLine, "error") || strings.Contains(lowerLine, "[err]") {
 		level = "error"
-	case strings.Contains(line, "[WARN]") || strings.Contains(line, "warning"):
+	} else if strings.Contains(lowerLine, "warn") || strings.Contains(lowerLine, "[warn]") {
 		level = "warn"
-	case strings.Contains(line, "[DEBUG]"):
-		level = "debug"
 	}
 
-	// 解析日志类别
-	switch {
-	case strings.Contains(line, "Tunnel ->"):
+	// 简单分类
+	if strings.Contains(line, "Tunnel ->") {
 		category = "隧道"
 		message = m.parseTunnelLog(line)
-	case strings.Contains(line, "Rule Hit"):
+	} else if strings.Contains(line, "Rule Hit") {
 		category = "规则"
 		message = m.parseRuleHitLog(line)
-	case strings.Contains(line, "LB ->"):
+	} else if strings.Contains(line, "LB ->") {
 		category = "负载"
 		message = m.parseLBLog(line)
-	case strings.Contains(line, "[Stats]"):
+	} else if strings.Contains(line, "[Stats]") {
 		category = "统计"
 		message = m.parseStatsLog(line)
-	case strings.Contains(line, "Ping") || strings.Contains(line, "Delay"):
-		category = "测速"
-	case source == "xray":
+	} else if source == "xray" {
 		category = "Xray"
 	}
 
-	// 移除日志中的前缀标记
 	message = strings.TrimPrefix(message, "[CLI] ")
 	message = strings.TrimPrefix(message, "[Core] ")
 
@@ -476,126 +456,31 @@ func (m *Manager) parseAndForwardLog(inst *EngineInstance, source, line string) 
 
 // parseTunnelLog 解析隧道日志
 func (m *Manager) parseTunnelLog(line string) string {
-	// Tunnel -> example.com (SNI) >>> real-server.com (Real) | Latency: 100ms
-	var sni, real, latency string
-
-	if idx := strings.Index(line, "Latency:"); idx != -1 {
-		latency = strings.TrimSpace(line[idx+8:])
-	}
-
+	// 简单格式化，去除冗余
 	if idx := strings.Index(line, "Tunnel ->"); idx != -1 {
-		rest := line[idx+9:]
-		parts := strings.Split(rest, ">>>")
-		if len(parts) >= 2 {
-			sni = strings.TrimSpace(strings.Split(parts[0], "(")[0])
-			realPart := strings.TrimSpace(parts[1])
-			real = strings.TrimSpace(strings.Split(realPart, "(")[0])
-		}
+		return line[idx:]
 	}
-
-	if sni != "" && real != "" {
-		return fmt.Sprintf("隧道建立: %s ==> %s [延迟: %s]", sni, real, latency)
-	}
-
 	return line
 }
 
-// parseRuleHitLog 解析规则命中日志
 func (m *Manager) parseRuleHitLog(line string) string {
-	// Rule Hit -> target.com | SNI: proxy-node.com (Rule: keyword)
-	var target, node, rule string
-
-	if idx := strings.Index(line, "Rule Hit ->"); idx != -1 {
-		rest := line[idx+11:]
-		parts := strings.Split(rest, "|")
-		if len(parts) >= 2 {
-			target = strings.TrimSpace(parts[0])
-
-			sniPart := parts[1]
-			if sniIdx := strings.Index(sniPart, "SNI:"); sniIdx != -1 {
-				nodeRest := sniPart[sniIdx+4:]
-				node = strings.TrimSpace(strings.Split(nodeRest, "(")[0])
-			}
-			if ruleIdx := strings.Index(sniPart, "(Rule:"); ruleIdx != -1 {
-				rule = strings.TrimSuffix(strings.TrimSpace(sniPart[ruleIdx+6:]), ")")
-			}
-		}
+	if idx := strings.Index(line, "Rule Hit"); idx != -1 {
+		return line[idx:]
 	}
-
-	if target != "" && node != "" {
-		return fmt.Sprintf("命中: %s -> %s (关键词: %s)", target, node, rule)
-	}
-
 	return line
 }
 
-// parseLBLog 解析负载均衡日志
 func (m *Manager) parseLBLog(line string) string {
-	// LB -> target.com | SNI: proxy.com | Algo: random
-	var target, node, algo string
-
 	if idx := strings.Index(line, "LB ->"); idx != -1 {
-		rest := line[idx+5:]
-		parts := strings.Split(rest, "|")
-
-		if len(parts) >= 1 {
-			target = strings.TrimSpace(parts[0])
-		}
-		for _, p := range parts {
-			p = strings.TrimSpace(p)
-			if strings.HasPrefix(p, "SNI:") {
-				node = strings.TrimSpace(p[4:])
-			} else if strings.HasPrefix(p, "Algo:") {
-				algo = strings.TrimSpace(p[5:])
-			}
-		}
+		return line[idx:]
 	}
-
-	// 翻译策略名称
-	switch algo {
-	case "random":
-		algo = "随机"
-	case "rr":
-		algo = "轮询"
-	case "hash":
-		algo = "哈希"
-	}
-
-	if target != "" && node != "" {
-		return fmt.Sprintf("访问: %s -> %s (策略: %s)", target, node, algo)
-	}
-
 	return line
 }
 
-// parseStatsLog 解析统计日志
 func (m *Manager) parseStatsLog(line string) string {
-	// [Stats] target.com | Up: 1.2KB | Down: 5.6MB | Time: 10.5s
-	var target, up, down, duration string
-
 	if idx := strings.Index(line, "[Stats]"); idx != -1 {
-		rest := line[idx+7:]
-		parts := strings.Split(rest, "|")
-
-		if len(parts) >= 1 {
-			target = strings.TrimSpace(parts[0])
-		}
-		for _, p := range parts {
-			p = strings.TrimSpace(p)
-			if strings.HasPrefix(p, "Up:") {
-				up = strings.TrimSpace(p[3:])
-			} else if strings.HasPrefix(p, "Down:") {
-				down = strings.TrimSpace(p[5:])
-			} else if strings.HasPrefix(p, "Time:") {
-				duration = strings.TrimSpace(p[5:])
-			}
-		}
+		return line[idx:]
 	}
-
-	if target != "" {
-		return fmt.Sprintf("结束: %s (上行:%s / 下行:%s) 时长:%s", target, up, down, duration)
-	}
-
 	return line
 }
 
@@ -611,11 +496,11 @@ func (m *Manager) waitProcess(inst *EngineInstance, source string, cmd *exec.Cmd
 	status := inst.Status
 	inst.mu.Unlock()
 
-	// 如果不是正常停止，报告错误
+	// 如果状态是 Running，说明是异常退出（不是用户点的停止）
 	if status == models.StatusRunning {
-		errMsg := "进程意外退出"
+		errMsg := fmt.Sprintf("%s 进程意外退出", source)
 		if err != nil {
-			errMsg = fmt.Sprintf("%s进程异常退出: %v", source, err)
+			errMsg += fmt.Sprintf(": %v", err)
 		}
 
 		inst.mu.Lock()
@@ -644,22 +529,19 @@ func (m *Manager) healthCheckLoop(inst *EngineInstance) {
 		xlinkProc := inst.XlinkProcess
 		inst.mu.RUnlock()
 
-		// 如果已停止，退出检查
 		if status != models.StatusRunning {
 			return
 		}
 
-		// 检查Xlink进程
 		if xlinkProc != nil && xlinkProc.Cmd != nil && xlinkProc.Cmd.Process != nil {
-			// 尝试发送信号0检查进程是否存在
+			// 发送 Signal 0 检查进程是否存在
 			if err := xlinkProc.Cmd.Process.Signal(os.Signal(nil)); err != nil {
-				// 进程已退出
+				// 进程不存在了
 				if inst.LogCallback != nil {
-					inst.LogCallback("error", "系统", "检测到进程已退出，正在重启...")
+					inst.LogCallback("error", "系统", "检测到核心进程已消失")
 				}
-
-				// 可以在这里实现自动重启逻辑
-				// m.RestartNode(inst.NodeID)
+				// 触发清理
+				m.stopInstanceLocked(inst.NodeID)
 				return
 			}
 		}
@@ -670,191 +552,110 @@ func (m *Manager) healthCheckLoop(inst *EngineInstance) {
 // Ping测试
 // =============================================================================
 
-// PingTest 执行延迟测试
 func (m *Manager) PingTest(node *models.NodeConfig, callback func(result models.PingResult)) error {
 	xlinkPath := filepath.Join(m.exeDir, XlinkBinaryName)
-
 	if _, err := os.Stat(xlinkPath); os.IsNotExist(err) {
-		return fmt.Errorf("核心文件不存在: %s", XlinkBinaryName)
+		return fmt.Errorf("核心文件不存在")
 	}
 
-	// 准备服务器列表
 	servers := strings.ReplaceAll(node.Server, "\r\n", ";")
 	servers = strings.ReplaceAll(servers, "\n", ";")
 
-	// 构建命令
 	args := []string{
 		"--ping",
 		"--server=" + servers,
 		"--key=" + node.SecretKey,
 	}
-
 	if node.IP != "" {
 		args = append(args, "--ip="+node.IP)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	// 这里的 Context Cancel 足够了，因为 Ping 进程很快自己会退出
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, xlinkPath, args...)
 	cmd.Dir = m.exeDir
-
 	m.hideWindow(cmd)
 
 	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return err
-	}
+	if err != nil { return err }
+	
+	if err := cmd.Start(); err != nil { return err }
 
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		return err
-	}
-
-	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("启动测速进程失败: %w", err)
-	}
-
-	// 读取输出
 	go func() {
-		scanner := bufio.NewScanner(io.MultiReader(stdout, stderr))
+		scanner := bufio.NewScanner(stdout)
 		for scanner.Scan() {
 			line := scanner.Text()
-			result := m.parsePingResult(line)
-			if result != nil {
-				callback(*result)
+			// 简单解析 Delay: 100ms
+			if strings.Contains(line, "Delay:") {
+				parts := strings.Split(line, "|")
+				if len(parts) >= 2 {
+					server := strings.TrimSpace(parts[0])
+					delayStr := strings.TrimPrefix(strings.TrimSpace(parts[1]), "Delay:")
+					delayStr = strings.TrimSuffix(strings.TrimSpace(delayStr), "ms")
+					var delay int
+					fmt.Sscanf(delayStr, "%d", &delay)
+					callback(models.PingResult{Server: server, Latency: delay})
+				}
 			}
 		}
 	}()
 
-	// 等待完成
 	return cmd.Wait()
-}
-
-// parsePingResult 解析Ping测试结果
-func (m *Manager) parsePingResult(line string) *models.PingResult {
-	line = strings.TrimSpace(line)
-
-	// 格式: server.com:443 | Delay: 100ms
-	// 或: server.com:443 | Error: connection refused
-	if !strings.Contains(line, "|") {
-		return nil
-	}
-
-	parts := strings.SplitN(line, "|", 2)
-	if len(parts) != 2 {
-		return nil
-	}
-
-	server := strings.TrimSpace(parts[0])
-	info := strings.TrimSpace(parts[1])
-
-	result := &models.PingResult{
-		Server:  server,
-		Latency: -1,
-	}
-
-	if strings.HasPrefix(info, "Delay:") {
-		delayStr := strings.TrimSpace(strings.TrimPrefix(info, "Delay:"))
-		delayStr = strings.TrimSuffix(delayStr, "ms")
-		var delay int
-		if _, err := fmt.Sscanf(delayStr, "%d", &delay); err == nil {
-			result.Latency = delay
-		}
-	} else if strings.HasPrefix(info, "Error:") {
-		result.Error = strings.TrimSpace(strings.TrimPrefix(info, "Error:"))
-	}
-
-	return result
 }
 
 // =============================================================================
 // 工具函数
 // =============================================================================
 
-// GetStatus 获取节点状态
 func (m *Manager) GetStatus(nodeID string) string {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-
 	if inst, exists := m.instances[nodeID]; exists {
 		inst.mu.RLock()
 		defer inst.mu.RUnlock()
 		return inst.Status
 	}
-
 	return models.StatusStopped
 }
 
-// GetAllStatuses 获取所有节点状态
 func (m *Manager) GetAllStatuses() map[string]models.EngineStatus {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-
 	statuses := make(map[string]models.EngineStatus)
-
 	for nodeID, inst := range m.instances {
 		inst.mu.RLock()
 		status := models.EngineStatus{
-			NodeID:    nodeID,
-			Status:    inst.Status,
-			StartTime: time.Time{},
+			NodeID: nodeID,
+			Status: inst.Status,
 		}
 		if inst.XlinkProcess != nil {
 			status.PID = inst.XlinkProcess.Pid
 			status.StartTime = inst.XlinkProcess.StartTime
 		}
-		if inst.XrayProcess != nil {
-			status.XrayPID = inst.XrayProcess.Pid
-		}
 		inst.mu.RUnlock()
-
 		statuses[nodeID] = status
 	}
-
 	return statuses
 }
 
-// IsRunning 检查节点是否运行中
-func (m *Manager) IsRunning(nodeID string) bool {
-	return m.GetStatus(nodeID) == models.StatusRunning
-}
-
-// FindFreePort 查找空闲端口
 func (m *Manager) FindFreePort() int {
-	// 尝试随机端口
-	rand.Seed(time.Now().UnixNano())
-
-	for i := 0; i < 100; i++ {
-		port := 49152 + rand.Intn(16383)
-
-		ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
-		if err == nil {
-			ln.Close()
-			return port
-		}
-	}
-
-	// 让系统分配
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		return 49152 + rand.Intn(16383)
+		return 0
 	}
 	defer ln.Close()
-
 	return ln.Addr().(*net.TCPAddr).Port
 }
 
-// GetExeDir 获取可执行文件目录
 func (m *Manager) GetExeDir() string {
 	return m.exeDir
 }
 
-// stopXlinkProcess 停止 Xlink 进程辅助方法
 func (m *Manager) stopXlinkProcess(inst *EngineInstance) {
 	inst.mu.Lock()
 	defer inst.mu.Unlock()
-
 	if inst.XlinkProcess != nil {
 		m.terminateProcess(inst.XlinkProcess)
 		inst.XlinkProcess = nil

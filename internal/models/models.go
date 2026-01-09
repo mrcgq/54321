@@ -2,6 +2,9 @@
 package models
 
 import (
+	"crypto/rand"
+	"encoding/hex"
+	"fmt"
 	"sync"
 	"time"
 )
@@ -50,7 +53,7 @@ const (
 )
 
 // =============================================================================
-// 分流规则
+// 核心数据结构
 // =============================================================================
 
 // RoutingRule 单条分流规则
@@ -60,10 +63,6 @@ type RoutingRule struct {
 	Match  string `json:"match"`  // 匹配内容
 	Target string `json:"target"` // 目标节点
 }
-
-// =============================================================================
-// 节点配置
-// =============================================================================
 
 // NodeConfig 单个节点的完整配置
 type NodeConfig struct {
@@ -85,9 +84,9 @@ type NodeConfig struct {
 	StrategyMode int `json:"strategy_mode"` // 负载策略
 
 	// DNS 防泄露配置
-	DNSMode       int    `json:"dns_mode"`        // DNS模式
-	CustomDNS     string `json:"custom_dns"`      // 自定义DNS服务器
-	EnableSniffing bool  `json:"enable_sniffing"` // 启用流量嗅探
+	DNSMode        int    `json:"dns_mode"`        // DNS模式
+	CustomDNS      string `json:"custom_dns"`      // 自定义DNS服务器
+	EnableSniffing bool   `json:"enable_sniffing"` // 启用流量嗅探
 
 	// 分流规则
 	Rules []RoutingRule `json:"rules"`
@@ -100,35 +99,31 @@ type NodeConfig struct {
 	RulesStr string `json:"rules_str,omitempty"` // 旧版规则字符串
 }
 
-// =============================================================================
-// 应用配置
-// =============================================================================
-
 // AppConfig 全局应用配置
 type AppConfig struct {
-	Nodes         []NodeConfig `json:"nodes"`           // 所有节点
-	AutoStart     bool         `json:"auto_start"`      // 开机自启
-	MinimizeToTray bool        `json:"minimize_to_tray"` // 最小化到托盘
-	Theme         string       `json:"theme"`           // 主题: "light", "dark", "system"
-	Language      string       `json:"language"`        // 语言: "zh-CN", "en-US"
-	
+	Nodes          []NodeConfig `json:"nodes"`            // 所有节点
+	AutoStart      bool         `json:"auto_start"`       // 开机自启
+	MinimizeToTray bool         `json:"minimize_to_tray"` // 最小化到托盘
+	Theme          string       `json:"theme"`            // 主题: "light", "dark", "system"
+	Language       string       `json:"language"`         // 语言: "zh-CN", "en-US"
+
 	// DNS 全局设置
 	GlobalDNSMode    int    `json:"global_dns_mode"`    // 全局DNS模式
 	TUNInterfaceName string `json:"tun_interface_name"` // TUN网卡名称
 }
 
 // =============================================================================
-// 运行时状态
+// 运行时状态结构
 // =============================================================================
 
 // EngineStatus 引擎运行状态
 type EngineStatus struct {
-	NodeID        string    `json:"node_id"`
-	Status        string    `json:"status"`
-	StartTime     time.Time `json:"start_time"`
-	PID           int       `json:"pid"`
-	XrayPID       int       `json:"xray_pid,omitempty"`
-	ErrorMessage  string    `json:"error_message,omitempty"`
+	NodeID       string    `json:"node_id"`
+	Status       string    `json:"status"`
+	StartTime    time.Time `json:"start_time"`
+	PID          int       `json:"pid"`
+	XrayPID      int       `json:"xray_pid,omitempty"`
+	ErrorMessage string    `json:"error_message,omitempty"`
 }
 
 // LogEntry 日志条目
@@ -136,9 +131,20 @@ type LogEntry struct {
 	Timestamp time.Time `json:"timestamp"`
 	NodeID    string    `json:"node_id"`
 	NodeName  string    `json:"node_name"`
-	Level     string    `json:"level"` // "info", "warn", "error", "debug"
+	Level     string    `json:"level"`    // "info", "warn", "error", "debug"
 	Category  string    `json:"category"` // "系统", "内核", "规则", "负载", "统计", "测速"
 	Message   string    `json:"message"`
+}
+
+// LogFilter 日志过滤选项
+type LogFilter struct {
+	NodeID     string     `json:"node_id,omitempty"`
+	Levels     []string   `json:"levels,omitempty"`
+	Categories []string   `json:"categories,omitempty"`
+	Search     string     `json:"search,omitempty"`
+	StartTime  *time.Time `json:"start_time,omitempty"`
+	EndTime    *time.Time `json:"end_time,omitempty"`
+	Limit      int        `json:"limit,omitempty"`
 }
 
 // PingResult 延迟测试结果
@@ -146,6 +152,15 @@ type PingResult struct {
 	Server  string `json:"server"`
 	Latency int    `json:"latency"` // 毫秒, -1 表示失败
 	Error   string `json:"error,omitempty"`
+}
+
+// PingStatus Ping状态
+type PingStatus struct {
+	IsRunning   bool   `json:"is_running"`
+	NodeID      string `json:"node_id"`
+	StartTime   string `json:"start_time"`
+	TestedCount int    `json:"tested_count"`
+	TotalCount  int    `json:"total_count"`
 }
 
 // =============================================================================
@@ -156,13 +171,16 @@ type PingResult struct {
 type EventType string
 
 const (
-	EventLogAppend     EventType = "log:append"
-	EventNodeStatus    EventType = "node:status"
-	EventPingResult    EventType = "ping:result"
-	EventConfigChanged EventType = "config:changed"
+	EventLogAppend         EventType = "log:append"
+	EventNodeStatus        EventType = "node:status"
+	EventPingResult        EventType = "ping:result"
+	EventPingComplete      EventType = "ping:complete"
+	EventPingBatchProgress EventType = "ping:batch:progress"
+	EventPingBatchComplete EventType = "ping:batch:complete"
+	EventConfigChanged     EventType = "config:changed"
 )
 
-// Event 前后端事件
+// Event 前后端事件结构
 type Event struct {
 	Type    EventType   `json:"type"`
 	Payload interface{} `json:"payload"`
@@ -174,12 +192,12 @@ type Event struct {
 
 // AppState 全局应用状态（线程安全）
 type AppState struct {
-	mu            sync.RWMutex
-	Config        *AppConfig
+	mu             sync.RWMutex
+	Config         *AppConfig
 	EngineStatuses map[string]*EngineStatus // key: NodeID
-	CurrentNodeID string
-	ExeDir        string
-	IsAutoStart   bool // 是否由开机自启触发
+	CurrentNodeID  string
+	ExeDir         string
+	IsAutoStart    bool // 是否由开机自启触发
 }
 
 // NewAppState 创建新的应用状态
@@ -233,7 +251,7 @@ func (s *AppState) UpdateNodeStatus(nodeID, status string, errMsg string) {
 			ErrorMessage: errMsg,
 		}
 	}
-	// 同步到节点配置
+	// 同步到节点配置 (内存中)
 	for i := range s.Config.Nodes {
 		if s.Config.Nodes[i].ID == nodeID {
 			s.Config.Nodes[i].Status = status
@@ -264,21 +282,27 @@ func NewDefaultNode(name string) NodeConfig {
 	}
 }
 
-// GenerateUUID 生成简单的UUID
+// GenerateUUID 生成UUID v4
 func GenerateUUID() string {
-	// 简单实现，实际可用 github.com/google/uuid
-	return time.Now().Format("20060102150405") + "-" + randomString(8)
+	b := make([]byte, 16)
+	_, err := rand.Read(b)
+	if err != nil {
+		// 回退到时间戳方式
+		return time.Now().Format("20060102150405") + "-" + randomHex(8)
+	}
+
+	// 设置版本号(v4)和变体
+	b[6] = (b[6] & 0x0f) | 0x40
+	b[8] = (b[8] & 0x3f) | 0x80
+
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }
 
-// randomString 生成随机字符串
-func randomString(n int) string {
-	const letters = "abcdefghijklmnopqrstuvwxyz0123456789"
-	b := make([]byte, n)
-	for i := range b {
-		b[i] = letters[time.Now().UnixNano()%int64(len(letters))]
-		time.Sleep(time.Nanosecond)
-	}
-	return string(b)
+// randomHex 生成随机十六进制字符串
+func randomHex(n int) string {
+	b := make([]byte, n/2+1)
+	rand.Read(b)
+	return hex.EncodeToString(b)[:n]
 }
 
 // GetStrategyString 获取策略字符串
@@ -304,38 +328,3 @@ func GetDNSModeString(mode int) string {
 		return "标准模式"
 	}
 }
-
-
-// =============================================================================
-// 改进的UUID生成
-// =============================================================================
-
-import (
-	"crypto/rand"
-	"encoding/hex"
-	// ... 其他导入
-)
-
-// GenerateUUID 生成UUID v4
-func GenerateUUID() string {
-	b := make([]byte, 16)
-	_, err := rand.Read(b)
-	if err != nil {
-		// 回退到时间戳方式
-		return time.Now().Format("20060102150405") + "-" + randomHex(8)
-	}
-
-	// 设置版本号(v4)和变体
-	b[6] = (b[6] & 0x0f) | 0x40
-	b[8] = (b[8] & 0x3f) | 0x80
-
-	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
-}
-
-// randomHex 生成随机十六进制字符串
-func randomHex(n int) string {
-	b := make([]byte, n/2+1)
-	rand.Read(b)
-	return hex.EncodeToString(b)[:n]
-}
-

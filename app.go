@@ -242,7 +242,7 @@ func (a *App) AddNode(name string) (*models.NodeConfig, error) {
 
 	// 异步保存并通知前端
 	go a.saveConfig()
-	//a.emitEvent(models.EventConfigChanged, nil)
+	a.emitEvent(models.EventConfigChanged, nil)
 
 	return &node, nil
 }
@@ -261,8 +261,8 @@ func (a *App) UpdateNode(node models.NodeConfig) error {
 
 			go a.saveConfig()
 			
-			// 🛑【核心修复】注释掉下面这行！
-			// 不要在这里广播事件，否则会导致前端死循环刷新！
+			// 🛑【核心修改】不再广播 ConfigChanged 事件
+			// 这切断了 前端更新 -> 后端保存 -> 广播事件 -> 前端刷新 的死循环
 			// a.emitEvent(models.EventConfigChanged, nil) 
 			
 			return nil

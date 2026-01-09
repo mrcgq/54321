@@ -6,7 +6,7 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"math/rand"
+
 	"net"
 	"os"
 	"os/exec"

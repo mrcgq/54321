@@ -28,13 +28,8 @@ jobs:
 
       # 步骤 2: 设置 Wails 环境
       # 这是最关键的一步，使用 Wails 官方提供的 Action
-      # 它会自动：
-      # - 安装 Go
-      # - 安装 Node.js / npm
-      # - 安装 Wails CLI
-      # - 安装 Windows 构建所需的依赖 (WebView2, CGO 工具链等)
       - name: Setup Wails environment
-        uses: wailsapp/wails-action@v2
+        uses: wailsapp/action-wails@v2 # <--- 已修正
         with:
           # 指定要安装的 Wails CLI 版本，建议与你本地开发版本保持一致
           wails-version: 'v2.8.0' 
@@ -50,7 +45,6 @@ jobs:
         run: wails build -platform windows/amd64 -ldflags "-H windowsgui -s -w"
 
       # 步骤 4: 准备打包资源 (处理内核文件)
-      # 因为你不把内核文件放在仓库里，所以我们需要在构建时下载它们
       - name: Prepare packaging resources
         run: |
           # 创建一个目录来存放最终的打包文件
@@ -60,9 +54,7 @@ jobs:
           cp build/bin/xlink-client.exe release/
           
           # --- 关键部分：下载运行时资源 ---
-          # 你需要将你的内核文件上传到一个稳定的下载地址 (例如 GitHub Release 的 Assets)
-          # 然后在这里用 PowerShell 的 Invoke-WebRequest (iwr) 命令下载它们
-          # 下面的 URL 都是占位符，请替换为你自己的实际下载链接！
+          # 请将下面的 URL 替换为你自己的实际下载链接！
           
           echo "Downloading runtime resources..."
           iwr -Uri "https://YOUR_DOWNLOAD_LINK/xlink-cli-binary.exe" -OutFile "release/xlink-cli-binary.exe"
@@ -76,15 +68,11 @@ jobs:
       # 步骤 5: 将打包文件压缩成 ZIP
       - name: Create ZIP archive
         run: |
-          # 使用 PowerShell 的 Compress-Archive 命令创建 zip 文件
           Compress-Archive -Path release\* -DestinationPath xlink-client-windows-amd64.zip
 
       # 步骤 6: 上传构建产物 (Artifact)
-      # 这样你就可以在 Actions 页面下载这个 zip 文件了
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          # 上传的产物名称
           name: xlink-client-windows-amd64
-          # 要上传的文件路径
           path: xlink-client-windows-amd64.zip

@@ -1,170 +1,136 @@
 <template>
-  <div class="h-full flex flex-col bg-gray-100 dark:bg-gray-900">
-    <!-- 顶部标题栏 -->
-    <!-- 监听 open-settings 事件打开设置弹窗 -->
-    <AppHeader @open-settings="showSettings = true" />
-    
-    <!-- 主内容区域 -->
-    <div class="flex-1 flex overflow-hidden">
-      <!-- 左侧节点列表 -->
-      <AppSidebar />
-      
-      <!-- 右侧内容区 -->
-      <main class="flex-1 flex flex-col overflow-hidden">
-        <!-- 节点配置编辑器 -->
-        <div class="flex-1 overflow-auto p-4">
-          <NodeEditor v-if="currentNode" :node="currentNode" />
-          <!-- 未选中节点时的空状态 -->
-          <EmptyState v-else />
-        </div>
-        
-        <!-- 底部日志区域 -->
-        <div class="h-64 border-t border-gray-200 dark:border-gray-700 shrink-0">
-          <LogViewer />
-        </div>
-      </main>
-    </div>
-    
-    <!-- 全局设置对话框 -->
-    <GeneralSettings v-if="showSettings" @close="showSettings = false" />
-    
-    <!-- 全局 Toast 通知 -->
-    <div class="fixed bottom-4 right-4 z-50 space-y-2 pointer-events-none">
-      <TransitionGroup name="fade">
-        <div
-          v-for="toast in toasts"
-          :key="toast.id"
-          :class="[
-            'px-4 py-3 rounded-lg shadow-lg text-white text-sm flex items-center gap-2 pointer-events-auto',
-            toast.type === 'success' && 'bg-green-500',
-            toast.type === 'error' && 'bg-red-500',
-            toast.type === 'warning' && 'bg-yellow-500',
-            toast.type === 'info' && 'bg-blue-500'
-          ]"
-        >
-          <span v-if="toast.type === 'success'">✓</span>
-          <span v-else-if="toast.type === 'error'">✗</span>
-          <span v-else-if="toast.type === 'warning'">⚠</span>
-          <span v-else>ℹ</span>
-          {{ toast.message }}
-        </div>
-      </TransitionGroup>
-    </div>
-    
-    <!-- 全局加载遮罩 -->
-    <Transition name="fade">
-      <div v-if="isLoading" class="fixed inset-0 bg-black/30 flex items-center justify-center z-50 backdrop-blur-sm">
-        <div class="bg-white dark:bg-gray-800 rounded-lg p-6 shadow-xl text-center">
-          <div class="animate-spin w-10 h-10 border-4 border-primary-500 border-t-transparent rounded-full mx-auto"></div>
-          <p class="mt-4 text-sm font-medium text-gray-600 dark:text-gray-300">加载中...</p>
-        </div>
+  <header class="h-14 bg-white dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700 flex items-center px-4 shrink-0 transition-colors duration-200">
+    <!-- Logo 和标题 -->
+    <div class="flex items-center gap-3">
+      <div class="w-8 h-8 bg-gradient-to-br from-blue-500 to-purple-600 rounded-lg flex items-center justify-center shadow-sm">
+        <svg class="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" 
+                d="M13 10V3L4 14h7v7l9-11h-7z" />
+        </svg>
       </div>
-    </Transition>
-  </div>
+      <h1 class="text-lg font-semibold text-gray-800 dark:text-white tracking-tight">
+        Xlink 客户端
+      </h1>
+      <span class="text-xs text-gray-500 dark:text-gray-400 bg-gray-100 dark:bg-gray-700 px-2 py-0.5 rounded border border-gray-200 dark:border-gray-600">
+        v22.0
+      </span>
+    </div>
+    
+    <!-- 运行状态指示 -->
+    <div class="ml-6 flex items-center gap-2 px-3 py-1 rounded-full bg-gray-50 dark:bg-gray-700/50">
+      <div :class="['status-dot', hasRunningNodes ? 'running' : 'stopped']"></div>
+      <span class="text-xs font-medium text-gray-600 dark:text-gray-300">
+        {{ hasRunningNodes ? `${runningCount} 个节点运行中` : '未运行' }}
+      </span>
+    </div>
+    
+    <!-- 间隔 -->
+    <div class="flex-1"></div>
+    
+    <!-- 全局操作按钮 -->
+    <div class="flex items-center gap-2">
+      <button
+        @click="startAll"
+        :disabled="isAllRunning"
+        class="btn-success flex items-center gap-1.5 text-xs py-1.5 shadow-sm active:scale-95 transition-transform"
+        title="启动所有节点"
+      >
+        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" />
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+        </svg>
+        全部启动
+      </button>
+      
+      <button
+        @click="stopAll"
+        :disabled="!hasRunningNodes"
+        class="btn-danger flex items-center gap-1.5 text-xs py-1.5 shadow-sm active:scale-95 transition-transform"
+        title="停止所有节点"
+      >
+        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 10a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1h-4a1 1 0 01-1-1v-4z" />
+        </svg>
+        全部停止
+      </button>
+    </div>
+    
+    <!-- 右侧工具栏 -->
+    <div class="ml-4 flex items-center gap-1 pl-4 border-l border-gray-200 dark:border-gray-700">
+      <!-- 主题切换 -->
+      <button @click="toggleTheme" class="btn-icon group" title="切换主题">
+        <svg v-if="isDark" class="w-5 h-5 text-yellow-400 group-hover:scale-110 transition-transform" fill="currentColor" viewBox="0 0 20 20">
+          <path fill-rule="evenodd" d="M10 2a1 1 0 011 1v1a1 1 0 11-2 0V3a1 1 0 011-1zm4 8a4 4 0 11-8 0 4 4 0 018 0zm-.464 4.95l.707.707a1 1 0 001.414-1.414l-.707-.707a1 1 0 00-1.414 1.414zm2.12-10.607a1 1 0 010 1.414l-.706.707a1 1 0 11-1.414-1.414l.707-.707a1 1 0 011.414 0zM17 11a1 1 0 100-2h-1a1 1 0 100 2h1zm-7 4a1 1 0 011 1v1a1 1 0 11-2 0v-1a1 1 0 011-1zM5.05 6.464A1 1 0 106.465 5.05l-.708-.707a1 1 0 00-1.414 1.414l.707.707zm1.414 8.486l-.707.707a1 1 0 01-1.414-1.414l.707-.707a1 1 0 011.414 1.414zM4 11a1 1 0 100-2H3a1 1 0 000 2h1z" clip-rule="evenodd" />
+        </svg>
+        <svg v-else class="w-5 h-5 text-gray-500 group-hover:text-gray-700 group-hover:scale-110 transition-transform" fill="currentColor" viewBox="0 0 20 20">
+          <path d="M17.293 13.293A8 8 0 016.707 2.707a8.001 8.001 0 1010.586 10.586z" />
+        </svg>
+      </button>
+      
+      <!-- 设置按钮 -->
+      <button @click="showSettings" class="btn-icon group" title="设置">
+        <svg class="w-5 h-5 text-gray-500 dark:text-gray-400 group-hover:text-gray-700 dark:group-hover:text-gray-200 group-hover:rotate-45 transition-transform duration-300" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+        </svg>
+      </button>
+    </div>
+  </header>
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, computed, defineComponent } from 'vue'
+import { computed } from 'vue'
 import { useAppStore } from '@/stores/app'
 import { useNodesStore } from '@/stores/nodes'
-import { useLogsStore } from '@/stores/logs'
-import { useWailsEvent } from '@/composables/useWails'
 
-// 组件导入
-import AppHeader from '@/components/layout/AppHeader.vue'
-import AppSidebar from '@/components/layout/AppSidebar.vue'
-import NodeEditor from '@/components/nodes/NodeEditor.vue'
-import LogViewer from '@/components/logs/LogViewer.vue'
-import GeneralSettings from '@/components/settings/GeneralSettings.vue'
-
-// 定义局部空状态组件
-const EmptyState = defineComponent({
-  template: `
-    <div class="h-full flex items-center justify-center text-gray-500 dark:text-gray-400">
-      <div class="text-center">
-        <svg class="w-16 h-16 mx-auto mb-4 text-gray-300 dark:text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" 
-                d="M5 12h14M5 12a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v4a2 2 0 01-2 2M5 12a2 2 0 00-2 2v4a2 2 0 002 2h14a2 2 0 002-2v-4a2 2 0 00-2-2" />
-        </svg>
-        <p class="text-lg font-medium">请选择或创建一个节点</p>
-        <p class="text-sm mt-2 opacity-70">在左侧列表点击 "+ 新建" 按钮开始使用</p>
-      </div>
-    </div>
-  `
-})
-
-// Store 实例
 const appStore = useAppStore()
 const nodesStore = useNodesStore()
-const logsStore = useLogsStore()
 
-// 响应式状态
-const showSettings = ref(false)
+// 定义事件：打开设置
+const emit = defineEmits<{
+  openSettings: []
+}>()
 
 // 计算属性
-const currentNode = computed(() => nodesStore.currentNode)
-const toasts = computed(() => appStore.toasts)
-const isLoading = computed(() => appStore.isLoading)
-
-// =============================================================================
-// Wails 事件监听 (后端 -> 前端)
-// =============================================================================
-
-// 监听节点状态变化 (启动/停止/错误)
-useWailsEvent('node:status', (data: { node_id: string; status: string }) => {
-  nodesStore.updateNodeStatus(data.node_id, data.status)
+const isDark = computed(() => appStore.isDark)
+const hasRunningNodes = computed(() => nodesStore.hasRunningNodes)
+const runningCount = computed(() => nodesStore.runningNodes.length)
+const isAllRunning = computed(() => {
+  return nodesStore.nodes.length > 0 && 
+         nodesStore.nodes.every(n => nodesStore.getNodeStatus(n.id) === 'running')
 })
 
-// 监听实时日志追加
-useWailsEvent('log:append', (entry: any) => {
-  logsStore.addLog(entry)
-})
+// 切换主题
+function toggleTheme() {
+  const themes: Array<'light' | 'dark' | 'system'> = ['light', 'dark', 'system']
+  const currentIndex = themes.indexOf(appStore.theme)
+  const nextIndex = (currentIndex + 1) % themes.length
+  appStore.setTheme(themes[nextIndex])
+}
 
-// 监听配置变更 (如导入/删除后)
-useWailsEvent('config:changed', () => {
-  nodesStore.fetchNodes()
-})
-
-// 监听单次 Ping 结果 (可选：如果在 UI 上显示实时延迟动画)
-useWailsEvent('ping:result', (result: any) => {
-  // console.debug('Ping result:', result)
-})
-
-// =============================================================================
-// 生命周期
-// =============================================================================
-
-onMounted(async () => {
-  appStore.setLoading(true)
-  
+// 启动所有
+async function startAll() {
   try {
-    // 1. 初始化数据
-    await Promise.all([
-      nodesStore.fetchNodes(), // 获取节点列表
-      logsStore.fetchLogs()    // 获取历史日志
-    ])
-    
-    // 2. 初始化日志监听器 (备用方案，如果 useWailsEvent 未生效)
-    logsStore.initEventListener()
-    
+    await nodesStore.startAllNodes()
+    appStore.showToast('success', '指令已发送：启动所有节点')
   } catch (e: any) {
-    appStore.showToast('error', '应用初始化失败: ' + e.message)
-    console.error('Initialization failed:', e)
-  } finally {
-    appStore.setLoading(false)
+    appStore.showToast('error', e.message || '启动失败')
   }
-})
+}
+
+// 停止所有
+async function stopAll() {
+  try {
+    await nodesStore.stopAllNodes()
+    appStore.showToast('success', '所有节点已停止')
+  } catch (e: any) {
+    appStore.showToast('error', e.message || '停止失败')
+  }
+}
+
+// 打开设置
+function showSettings() {
+  emit('openSettings')
+}
 </script>
-
-<style>
-/* 全局过渡动画定义 */
-.fade-enter-active,
-.fade-leave-active {
-  transition: opacity 0.2s ease;
-}
-
-.fade-enter-from,
-.fade-leave-to {
-  opacity: 0;
-}
-</style>

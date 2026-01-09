@@ -15,6 +15,9 @@
     "productName": "Xlink Client",
     "productVersion": "22.0.0",
     "copyright": "Copyright © 2024 Xlink",
-    "comments": "Xlink Genesis Client - Wails Edition"
-  }
+    "comments": "Xlink Genesis Client - Wails Edition with DNS Leak Protection"
+  },
+  "nsisType": "multiple",
+  "obfuscated": false,
+  "garbleargs": ""
 }

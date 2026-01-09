@@ -1,0 +1,211 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ============================================ */
+/* 基础样式 */
+/* ============================================ */
+
+:root {
+  --color-primary: #3b82f6;
+  --color-success: #10b981;
+  --color-warning: #f59e0b;
+  --color-danger: #ef4444;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html, body, #app {
+  height: 100%;
+  overflow: hidden;
+}
+
+body {
+  font-family: 'Microsoft YaHei UI', 'PingFang SC', sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+  color: #1f2937;
+  background-color: #f3f4f6;
+}
+
+.dark body {
+  color: #f3f4f6;
+  background-color: #1f2937;
+}
+
+/* ============================================ */
+/* 滚动条样式 */
+/* ============================================ */
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #94a3b8;
+}
+
+.dark ::-webkit-scrollbar-thumb {
+  background: #475569;
+}
+
+.dark ::-webkit-scrollbar-thumb:hover {
+  background: #64748b;
+}
+
+/* ============================================ */
+/* 输入框样式 */
+/* ============================================ */
+
+@layer components {
+  .input-base {
+    @apply w-full px-3 py-2 text-sm border border-gray-300 rounded-lg
+           bg-white text-gray-900
+           focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent
+           disabled:bg-gray-100 disabled:cursor-not-allowed
+           transition-colors duration-200;
+  }
+
+  .dark .input-base {
+    @apply border-gray-600 bg-gray-800 text-gray-100
+           disabled:bg-gray-700;
+  }
+
+  .btn-base {
+    @apply px-4 py-2 text-sm font-medium rounded-lg
+           focus:outline-none focus:ring-2 focus:ring-offset-2
+           disabled:opacity-50 disabled:cursor-not-allowed
+           transition-all duration-200;
+  }
+
+  .btn-primary {
+    @apply btn-base bg-primary-600 text-white
+           hover:bg-primary-700
+           focus:ring-primary-500;
+  }
+
+  .btn-secondary {
+    @apply btn-base bg-gray-200 text-gray-700
+           hover:bg-gray-300
+           focus:ring-gray-500;
+  }
+
+  .dark .btn-secondary {
+    @apply bg-gray-700 text-gray-200 hover:bg-gray-600;
+  }
+
+  .btn-success {
+    @apply btn-base bg-green-600 text-white
+           hover:bg-green-700
+           focus:ring-green-500;
+  }
+
+  .btn-danger {
+    @apply btn-base bg-red-600 text-white
+           hover:bg-red-700
+           focus:ring-red-500;
+  }
+
+  .btn-icon {
+    @apply p-2 rounded-lg hover:bg-gray-200 dark:hover:bg-gray-700
+           transition-colors duration-200;
+  }
+}
+
+/* ============================================ */
+/* 状态指示器 */
+/* ============================================ */
+
+.status-dot {
+  @apply w-2 h-2 rounded-full;
+}
+
+.status-dot.running {
+  @apply bg-green-500;
+  animation: pulse 2s infinite;
+}
+
+.status-dot.stopped {
+  @apply bg-gray-400;
+}
+
+.status-dot.error {
+  @apply bg-red-500;
+}
+
+.status-dot.starting {
+  @apply bg-yellow-500;
+  animation: pulse 1s infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+/* ============================================ */
+/* 日志样式 */
+/* ============================================ */
+
+.log-entry {
+  @apply font-mono text-xs leading-relaxed py-0.5;
+}
+
+.log-entry.level-error {
+  @apply text-red-500 dark:text-red-400;
+}
+
+.log-entry.level-warn {
+  @apply text-yellow-600 dark:text-yellow-400;
+}
+
+.log-entry.level-info {
+  @apply text-gray-700 dark:text-gray-300;
+}
+
+.log-entry.level-debug {
+  @apply text-gray-500 dark:text-gray-500;
+}
+
+/* ============================================ */
+/* 动画 */
+/* ============================================ */
+
+.fade-enter-active,
+.fade-leave-active {
+  transition: opacity 0.2s ease;
+}
+
+.fade-enter-from,
+.fade-leave-to {
+  opacity: 0;
+}
+
+.slide-enter-active,
+.slide-leave-active {
+  transition: transform 0.3s ease, opacity 0.3s ease;
+}
+
+.slide-enter-from {
+  transform: translateX(-20px);
+  opacity: 0;
+}
+
+.slide-leave-to {
+  transform: translateX(20px);
+  opacity: 0;
+}

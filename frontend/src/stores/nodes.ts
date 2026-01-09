@@ -2,7 +2,7 @@ import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import type { NodeConfig, EngineStatus } from '@/types'
 
-// Wails 绑定
+// Wails 绑定声明
 declare const window: {
   go: {
     main: {
@@ -52,16 +52,14 @@ export const useNodesStore = defineStore('nodes', () => {
 
   const hasRunningNodes = computed(() => runningNodes.value.length > 0)
 
-  // 方法
+  // 方法：获取列表
   async function fetchNodes() {
     isLoading.value = true
     error.value = null
-    
     try {
       nodes.value = await window.go.main.App.GetNodes()
       await fetchStatuses()
-      
-      // 如果没有选中节点，选中第一个
+      // 默认选中第一个
       if (!currentNodeId.value && nodes.value.length > 0) {
         currentNodeId.value = nodes.value[0].id
       }
@@ -75,9 +73,7 @@ export const useNodesStore = defineStore('nodes', () => {
   async function fetchStatuses() {
     try {
       statuses.value = await window.go.main.App.GetAllNodeStatuses()
-    } catch (e) {
-      // ignore
-    }
+    } catch (e) {}
   }
 
   function selectNode(id: string) {
@@ -86,18 +82,15 @@ export const useNodesStore = defineStore('nodes', () => {
 
   async function addNode(name: string = '新节点') {
     const node = await window.go.main.App.AddNode(name)
-    // 增删操作必须刷新列表，因为列表长度变了
-    await fetchNodes()
+    await fetchNodes() // 增删需要刷新列表
     currentNodeId.value = node.id
     return node
   }
 
-  // ⚠️【核心修复】updateNode 只负责向后端发送保存请求
-  // 绝对不要在这里修改 nodes.value，也绝对不要调用 fetchNodes
-  // 这样就切断了前端死循环的源头
+  // ⚠️【核心修复】绝对不更新本地 state，切断死循环
   async function updateNode(node: NodeConfig) {
     await window.go.main.App.UpdateNode(node)
-    // 结束。不做任何其他操作。
+    // 结束。不要 fetchNodes，不要修改 nodes.value
   }
 
   async function deleteNode(id: string) {
@@ -167,7 +160,7 @@ export const useNodesStore = defineStore('nodes', () => {
   async function addRule(nodeId: string, rule: any) {
     await window.go.main.App.AddRule(nodeId, rule);
     // 规则变动不频繁，允许刷新
-    await fetchNodes(); 
+    await fetchNodes();
   }
   
   async function updateRule(nodeId: string, rule: any) {

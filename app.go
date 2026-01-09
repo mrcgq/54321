@@ -260,8 +260,11 @@ func (a *App) UpdateNode(node models.NodeConfig) error {
 			a.state.Config.Nodes[i] = node
 
 			go a.saveConfig()
-			// 【关键修复】删除下面这行，不再广播事件
-			// a.emitEvent(models.EventConfigChanged, nil)
+			
+			// 🛑【核心修复】注释掉下面这行！
+			// 不要在这里广播事件，否则会导致前端死循环刷新！
+			// a.emitEvent(models.EventConfigChanged, nil) 
+			
 			return nil
 		}
 	}

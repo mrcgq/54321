@@ -249,22 +249,22 @@ const props = defineProps<{
 const appStore = useAppStore()
 const nodesStore = useNodesStore()
 
-// 本地副本
-const localNode = ref<NodeConfig>({ ...props.node })
+// 【修复关键点】使用深拷贝初始化，断开与 Store 的响应式连接
+const localNode = ref<NodeConfig>(JSON.parse(JSON.stringify(props.node)))
 
-// 规则对话框
 const showRuleDialog = ref(false)
 const editingRule = ref<RoutingRule | null>(null)
 
-// 状态
 const status = computed(() => nodesStore.getNodeStatus(props.node.id))
 
-// 监听 prop 变化
+// 【修复关键点】监听 props 变化时，同样使用深拷贝更新
 watch(() => props.node, (newNode) => {
-  localNode.value = { ...newNode }
+  // 只有当 ID 变化时才更新，避免自身 updateNode 触发的循环
+  if (newNode.id !== localNode.value.id) {
+    localNode.value = JSON.parse(JSON.stringify(newNode))
+  }
 }, { deep: true })
 
-// 保存节点
 async function saveNode() {
   try {
     await nodesStore.updateNode(localNode.value)
@@ -273,7 +273,6 @@ async function saveNode() {
   }
 }
 
-// 编辑名称
 function editName() {
   const name = prompt('请输入新的节点名称:', localNode.value.name)
   if (name && name !== localNode.value.name) {
@@ -282,7 +281,6 @@ function editName() {
   }
 }
 
-// 导出节点
 async function exportNode() {
   try {
     await nodesStore.exportNode(props.node.id)
@@ -292,7 +290,6 @@ async function exportNode() {
   }
 }
 
-// 启动/停止
 async function startNode() {
   try {
     await nodesStore.startNode(props.node.id)
@@ -311,7 +308,6 @@ async function stopNode() {
   }
 }
 
-// 规则操作
 function editRule(rule: RoutingRule) {
   editingRule.value = { ...rule }
   showRuleDialog.value = true
@@ -322,6 +318,7 @@ async function deleteRule(ruleId: string) {
   
   try {
     await nodesStore.deleteRule(props.node.id, ruleId)
+    // 重新获取数据会更新 props.node，进而更新 localNode
     appStore.showToast('success', '规则已删除')
   } catch (e: any) {
     appStore.showToast('error', e.message)

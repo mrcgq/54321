@@ -848,6 +848,7 @@ func (m *Manager) FindFreePort() int {
 // GetExeDir 获取可执行文件目录
 func (m *Manager) GetExeDir() string {
 	return m.exeDir
+}
 
 // stopXlinkProcess 停止 Xlink 进程辅助方法
 func (m *Manager) stopXlinkProcess(inst *EngineInstance) {
@@ -858,5 +859,4 @@ func (m *Manager) stopXlinkProcess(inst *EngineInstance) {
 		m.terminateProcess(inst.XlinkProcess)
 		inst.XlinkProcess = nil
 	}
-}
 }

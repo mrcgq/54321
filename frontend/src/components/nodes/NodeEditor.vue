@@ -1,6 +1,6 @@
 <template>
   <div class="bg-white dark:bg-gray-800 rounded-lg shadow-sm border border-gray-200 dark:border-gray-700 overflow-hidden">
-    <!-- 头部 -->
+    <!-- Header -->
     <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-700 flex items-center justify-between">
       <div class="flex items-center gap-3">
         <div :class="['status-dot', status]"></div>
@@ -19,36 +19,34 @@
       </div>
     </div>
     
-    <!-- 配置表单 -->
+    <!-- Config Form -->
     <div class="p-6 space-y-6 max-h-[calc(100vh-400px)] overflow-y-auto">
-      <!-- 基本配置 -->
       <section>
         <h4 class="text-sm font-medium text-gray-700 dark:text-gray-300 mb-4">基本配置</h4>
         <div class="grid grid-cols-2 gap-4">
           <div>
             <label class="block text-sm text-gray-600 dark:text-gray-400 mb-1">本地监听</label>
-            <input v-model="localNode.listen" type="text" class="input-base" @change="saveNode" />
+            <input v-model.lazy="localNode.listen" type="text" class="input-base" @change="saveNode" />
           </div>
           <div>
             <label class="block text-sm text-gray-600 dark:text-gray-400 mb-1">全局指定 IP</label>
-            <input v-model="localNode.ip" type="text" class="input-base" @change="saveNode" />
+            <input v-model.lazy="localNode.ip" type="text" class="input-base" @change="saveNode" />
           </div>
         </div>
         <div class="mt-4">
           <label class="block text-sm text-gray-600 dark:text-gray-400 mb-1">服务器地址池</label>
-          <textarea v-model="localNode.server" rows="3" class="input-base font-mono" @change="saveNode"></textarea>
+          <textarea v-model.lazy="localNode.server" rows="3" class="input-base font-mono text-sm resize-none" @change="saveNode"></textarea>
         </div>
         <div class="grid grid-cols-2 gap-4 mt-4">
-          <div><label class="block text-sm text-gray-600 dark:text-gray-400 mb-1">Token</label><input v-model="localNode.token" type="password" class="input-base" @change="saveNode" /></div>
-          <div><label class="block text-sm text-gray-600 dark:text-gray-400 mb-1">Secret Key</label><input v-model="localNode.secret_key" type="password" class="input-base" @change="saveNode" /></div>
+          <div><label class="block text-sm text-gray-600 dark:text-gray-400 mb-1">Token</label><input v-model.lazy="localNode.token" type="password" class="input-base" @change="saveNode" /></div>
+          <div><label class="block text-sm text-gray-600 dark:text-gray-400 mb-1">Secret Key</label><input v-model.lazy="localNode.secret_key" type="password" class="input-base" @change="saveNode" /></div>
         </div>
         <div class="grid grid-cols-2 gap-4 mt-4">
-          <div><label class="block text-sm text-gray-600 dark:text-gray-400 mb-1">回源 IP</label><input v-model="localNode.fallback_ip" type="text" class="input-base" @change="saveNode" /></div>
-          <div><label class="block text-sm text-gray-600 dark:text-gray-400 mb-1">上游 SOCKS5</label><input v-model="localNode.socks5" type="text" class="input-base" @change="saveNode" /></div>
+          <div><label class="block text-sm text-gray-600 dark:text-gray-400 mb-1">回源 IP</label><input v-model.lazy="localNode.fallback_ip" type="text" class="input-base" @change="saveNode" /></div>
+          <div><label class="block text-sm text-gray-600 dark:text-gray-400 mb-1">上游 SOCKS5</label><input v-model.lazy="localNode.socks5" type="text" class="input-base" @change="saveNode" /></div>
         </div>
       </section>
       
-      <!-- 路由配置 -->
       <section>
         <h4 class="text-sm font-medium text-gray-700 dark:text-gray-300 mb-4">路由配置</h4>
         <div class="grid grid-cols-2 gap-4">
@@ -70,7 +68,6 @@
         </div>
       </section>
 
-      <!-- DNS -->
       <section>
         <h4 class="text-sm font-medium text-gray-700 dark:text-gray-300 mb-4">DNS 防泄露</h4>
         <div class="grid grid-cols-2 gap-4">
@@ -91,7 +88,6 @@
         </div>
       </section>
 
-      <!-- 规则 -->
       <section>
         <div class="flex items-center justify-between mb-4">
           <h4 class="text-sm font-medium text-gray-700 dark:text-gray-300">分流规则 ({{ localNode.rules?.length || 0 }})</h4>
@@ -106,7 +102,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, watch, computed } from 'vue'
+import { ref, computed } from 'vue'
 import { useAppStore } from '@/stores/app'
 import { useNodesStore } from '@/stores/nodes'
 import type { NodeConfig, RoutingRule } from '@/types'
@@ -117,20 +113,16 @@ const props = defineProps<{ node: NodeConfig }>()
 const appStore = useAppStore()
 const nodesStore = useNodesStore()
 
-const clone = (n: NodeConfig) => JSON.parse(JSON.stringify(n))
-const localNode = ref<NodeConfig>(clone(props.node))
+// Initialize local copy deep cloned. Only runs once on mount.
+const localNode = ref<NodeConfig>(JSON.parse(JSON.stringify(props.node)))
 const showRuleDialog = ref(false)
 const editingRule = ref<RoutingRule | null>(null)
 
 const status = computed(() => nodesStore.getNodeStatus(props.node.id))
 
-watch(() => props.node.id, () => {
-  localNode.value = clone(props.node)
-})
-
 async function saveNode() {
   await nodesStore.updateNode(localNode.value)
-  appStore.showToast('success', '已保存')
+  // No toast to avoid spamming
 }
 
 function editName() {
@@ -146,13 +138,8 @@ async function exportNode() {
   appStore.showToast('success', '已复制')
 }
 
-async function startNode() {
-  await nodesStore.startNode(props.node.id)
-}
-
-async function stopNode() {
-  await nodesStore.stopNode(props.node.id)
-}
+async function startNode() { await nodesStore.startNode(props.node.id) }
+async function stopNode() { await nodesStore.stopNode(props.node.id) }
 
 function editRule(rule: RoutingRule) {
   editingRule.value = { ...rule }
@@ -160,8 +147,10 @@ function editRule(rule: RoutingRule) {
 }
 
 async function deleteRule(ruleId: string) {
+  if(!confirm("删除?")) return
   await nodesStore.deleteRule(props.node.id, ruleId)
-  // fetchNodes in store will update the view
+  // Manually update local state since we broke the reactive loop
+  localNode.value.rules = localNode.value.rules.filter(r => r.id !== ruleId)
 }
 
 async function saveRule(rule: RoutingRule) {
@@ -171,6 +160,11 @@ async function saveRule(rule: RoutingRule) {
     await nodesStore.addRule(props.node.id, rule)
   }
   closeRuleDialog()
+  // Refresh data from backend to ensure consistency
+  await nodesStore.fetchNodes()
+  // Re-sync local state
+  const fresh = nodesStore.nodes.find(n => n.id === props.node.id)
+  if(fresh) localNode.value = JSON.parse(JSON.stringify(fresh))
 }
 
 function closeRuleDialog() {

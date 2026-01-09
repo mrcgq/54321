@@ -169,10 +169,16 @@ const themes = [
   { value: 'system', label: '跟随系统' }
 ]
 
+
+
+
+
+
 onMounted(async () => {
   try {
-    const settings = await window.go.main.App.GetSettings()
-    theme.value = settings.theme || 'system'
+	const settings = await window.go.main.App.GetSettings()
+    // 使用 'as' 强制告诉编译器这个字符串是合法的
+    theme.value = (settings.theme as 'light' | 'dark' | 'system') || 'system'
     autoStart.value = settings.auto_start || false
     minimizeToTray.value = settings.minimize_to_tray !== false
   } catch (e) {

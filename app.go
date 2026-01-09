@@ -204,8 +204,8 @@ func (a *App) Quit() {
 
 // GetNodes 获取所有节点列表 (包含运行时状态)
 func (a *App) GetNodes() []models.NodeConfig {
-	a.state.Mu.RLock() // 修改为 Mu
-	defer a.state.Mu.RUnlock() // 修改为 Mu
+	a.state.Mu.RLock()
+	defer a.state.Mu.RUnlock()
 
 	// 深拷贝节点列表，避免并发读写问题
 	nodes := make([]models.NodeConfig, len(a.state.Config.Nodes))
@@ -230,8 +230,8 @@ func (a *App) GetNode(id string) *models.NodeConfig {
 
 // AddNode 添加新节点
 func (a *App) AddNode(name string) (*models.NodeConfig, error) {
-	a.state.Mu.Lock() // 修改为 Mu
-	defer a.state.Mu.Unlock() // 修改为 Mu
+	a.state.Mu.Lock()
+	defer a.state.Mu.Unlock()
 
 	if len(a.state.Config.Nodes) >= models.MaxNodes {
 		return nil, fmt.Errorf("节点数量已达上限 (%d)", models.MaxNodes)
@@ -249,8 +249,8 @@ func (a *App) AddNode(name string) (*models.NodeConfig, error) {
 
 // UpdateNode 更新节点配置
 func (a *App) UpdateNode(node models.NodeConfig) error {
-	a.state.Mu.Lock() // 修改为 Mu
-	defer a.state.Mu.Unlock() // 修改为 Mu
+	a.state.Mu.Lock()
+	defer a.state.Mu.Unlock()
 
 	for i := range a.state.Config.Nodes {
 		if a.state.Config.Nodes[i].ID == node.ID {
@@ -260,7 +260,8 @@ func (a *App) UpdateNode(node models.NodeConfig) error {
 			a.state.Config.Nodes[i] = node
 
 			go a.saveConfig()
-			a.emitEvent(models.EventConfigChanged, nil)
+			// 【关键修复】删除下面这行，不再广播事件
+			// a.emitEvent(models.EventConfigChanged, nil)
 			return nil
 		}
 	}
@@ -270,8 +271,8 @@ func (a *App) UpdateNode(node models.NodeConfig) error {
 
 // DeleteNode 删除节点
 func (a *App) DeleteNode(id string) error {
-	a.state.Mu.Lock() // 修改为 Mu
-	defer a.state.Mu.Unlock() // 修改为 Mu
+	a.state.Mu.Lock()
+	defer a.state.Mu.Unlock()
 
 	// 检查节点是否正在运行
 	if es, ok := a.state.EngineStatuses[id]; ok && es.Status == models.StatusRunning {
@@ -303,8 +304,8 @@ func (a *App) DeleteNode(id string) error {
 
 // DuplicateNode 复制节点
 func (a *App) DuplicateNode(id string) (*models.NodeConfig, error) {
-	a.state.Mu.Lock() // 修改为 Mu
-	defer a.state.Mu.Unlock() // 修改为 Mu
+	a.state.Mu.Lock()
+	defer a.state.Mu.Unlock()
 
 	if len(a.state.Config.Nodes) >= models.MaxNodes {
 		return nil, fmt.Errorf("节点数量已达上限")
@@ -383,10 +384,10 @@ func (a *App) StopNode(id string) error {
 
 // StartAllNodes 启动所有配置的节点
 func (a *App) StartAllNodes() error {
-	a.state.Mu.RLock() // 修改为 Mu
+	a.state.Mu.RLock()
 	nodes := make([]models.NodeConfig, len(a.state.Config.Nodes))
 	copy(nodes, a.state.Config.Nodes)
-	a.state.Mu.RUnlock() // 修改为 Mu
+	a.state.Mu.RUnlock()
 
 	var lastErr error
 	for _, node := range nodes {
@@ -442,12 +443,12 @@ func (a *App) StopPingTest() {
 
 // BatchPingTest 批量测试所有节点 (Beta)
 func (a *App) BatchPingTest() error {
-	a.state.Mu.RLock() // 修改为 Mu
+	a.state.Mu.RLock()
 	nodes := make([]*models.NodeConfig, len(a.state.Config.Nodes))
 	for i := range a.state.Config.Nodes {
 		nodes[i] = &a.state.Config.Nodes[i]
 	}
-	a.state.Mu.RUnlock() // 修改为 Mu
+	a.state.Mu.RUnlock()
 
 	go func() {
 		results := a.pingManager.BatchPing(nodes, func(current, total int, result logger.BatchPingResult) {
@@ -479,8 +480,8 @@ func (a *App) GetAllNodeStatuses() map[string]models.EngineStatus {
 
 // AddRule 为指定节点添加分流规则
 func (a *App) AddRule(nodeID string, rule models.RoutingRule) error {
-	a.state.Mu.Lock() // 修改为 Mu
-	defer a.state.Mu.Unlock() // 修改为 Mu
+	a.state.Mu.Lock()
+	defer a.state.Mu.Unlock()
 
 	for i := range a.state.Config.Nodes {
 		if a.state.Config.Nodes[i].ID == nodeID {
@@ -501,8 +502,8 @@ func (a *App) AddRule(nodeID string, rule models.RoutingRule) error {
 
 // UpdateRule 更新规则
 func (a *App) UpdateRule(nodeID string, rule models.RoutingRule) error {
-	a.state.Mu.Lock() // 修改为 Mu
-	defer a.state.Mu.Unlock() // 修改为 Mu
+	a.state.Mu.Lock()
+	defer a.state.Mu.Unlock()
 
 	for i := range a.state.Config.Nodes {
 		if a.state.Config.Nodes[i].ID == nodeID {
@@ -522,8 +523,8 @@ func (a *App) UpdateRule(nodeID string, rule models.RoutingRule) error {
 
 // DeleteRule 删除规则
 func (a *App) DeleteRule(nodeID, ruleID string) error {
-	a.state.Mu.Lock() // 修改为 Mu
-	defer a.state.Mu.Unlock() // 修改为 Mu
+	a.state.Mu.Lock()
+	defer a.state.Mu.Unlock()
 
 	for i := range a.state.Config.Nodes {
 		if a.state.Config.Nodes[i].ID == nodeID {
@@ -569,8 +570,8 @@ func (a *App) ApplyPreset(nodeID, presetName string) error {
 		return fmt.Errorf("预设不存在: %s", presetName)
 	}
 
-	a.state.Mu.Lock() // 修改为 Mu
-	defer a.state.Mu.Unlock() // 修改为 Mu
+	a.state.Mu.Lock()
+	defer a.state.Mu.Unlock()
 
 	for i := range a.state.Config.Nodes {
 		if a.state.Config.Nodes[i].ID == nodeID {
@@ -626,9 +627,9 @@ func (a *App) ImportFromClipboard() (int, error) {
 		return 0, err
 	}
 
-	a.state.Mu.Lock() // 修改为 Mu
+	a.state.Mu.Lock()
 	a.state.Config = a.configManager.GetConfig()
-	a.state.Mu.Unlock() // 修改为 Mu
+	a.state.Mu.Unlock()
 
 	go a.saveConfig()
 	a.emitEvent(models.EventConfigChanged, nil)
@@ -655,9 +656,9 @@ func (a *App) ExportToClipboard(id string) error {
 
 // ExportAllToClipboard 导出所有节点到剪贴板
 func (a *App) ExportAllToClipboard() error {
-	a.state.Mu.RLock() // 修改为 Mu
+	a.state.Mu.RLock()
 	nodes := a.state.Config.Nodes
-	a.state.Mu.RUnlock() // 修改为 Mu
+	a.state.Mu.RUnlock()
 
 	var uris []string
 	for _, node := range nodes {
@@ -696,9 +697,9 @@ func (a *App) RestoreBackup(backupName string) error {
 	}
 
 	// 重新加载到内存
-	a.state.Mu.Lock() // 修改为 Mu
+	a.state.Mu.Lock()
 	a.state.Config = a.configManager.GetConfig()
-	a.state.Mu.Unlock() // 修改为 Mu
+	a.state.Mu.Unlock()
 
 	a.emitEvent(models.EventConfigChanged, nil)
 	a.logManager.LogSystem(logger.LevelInfo, fmt.Sprintf("已从备份恢复: %s", backupName))
@@ -712,18 +713,18 @@ func (a *App) RestoreBackup(backupName string) error {
 
 // GetSettings 获取全局设置
 func (a *App) GetSettings() models.AppConfig {
-	a.state.Mu.RLock() // 修改为 Mu
-	defer a.state.Mu.RUnlock() // 修改为 Mu
+	a.state.Mu.RLock()
+	defer a.state.Mu.RUnlock()
 	return *a.state.Config
 }
 
 // UpdateSettings 更新全局设置
 func (a *App) UpdateSettings(cfg models.AppConfig) error {
-	a.state.Mu.Lock() // 修改为 Mu
+	a.state.Mu.Lock()
 	// 保持节点列表不变，只更新设置项
 	cfg.Nodes = a.state.Config.Nodes
 	a.state.Config = &cfg
-	a.state.Mu.Unlock() // 修改为 Mu
+	a.state.Mu.Unlock()
 
 	go a.saveConfig()
 	return nil
@@ -746,9 +747,9 @@ func (a *App) SetAutoStart(enabled bool) error {
 		return err
 	}
 
-	a.state.Mu.Lock() // 修改为 Mu
+	a.state.Mu.Lock()
 	a.state.Config.AutoStart = enabled
-	a.state.Mu.Unlock() // 修改为 Mu
+	a.state.Mu.Unlock()
 
 	go a.saveConfig()
 	return nil
@@ -859,8 +860,8 @@ func (a *App) IsTUNSupported() map[string]interface{} {
 
 // UpdateDNSConfig 更新节点的 DNS 配置
 func (a *App) UpdateDNSConfig(nodeID string, mode int, enableSniffing bool) error {
-	a.state.Mu.Lock() // 修改为 Mu
-	defer a.state.Mu.Unlock() // 修改为 Mu
+	a.state.Mu.Lock()
+	defer a.state.Mu.Unlock()
 
 	for i := range a.state.Config.Nodes {
 		if a.state.Config.Nodes[i].ID == nodeID {
@@ -1015,18 +1016,18 @@ func (a *App) loadConfig() {
 		}
 	}
 
-	a.state.Mu.Lock() // 修改为 Mu
+	a.state.Mu.Lock()
 	a.state.Config = cfg
-	a.state.Mu.Unlock() // 修改为 Mu
+	a.state.Mu.Unlock()
 
 	a.logManager.LogSystem(logger.LevelInfo, fmt.Sprintf("已加载 %d 个节点配置", len(cfg.Nodes)))
 }
 
 // saveConfig 保存配置
 func (a *App) saveConfig() {
-	a.state.Mu.RLock() // 修改为 Mu
+	a.state.Mu.RLock()
 	a.configManager.UpdateConfig(a.state.Config)
-	a.state.Mu.RUnlock() // 修改为 Mu
+	a.state.Mu.RUnlock()
 
 	if err := a.configManager.Save(); err != nil {
 		a.logManager.LogSystem(logger.LevelError, fmt.Sprintf("保存配置失败: %v", err))

@@ -2,7 +2,7 @@ import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import type { NodeConfig, EngineStatus } from '@/types'
 
-// Wails 绑定（将在运行时可用）
+// Wails 绑定
 declare const window: {
   go: {
     main: {
@@ -61,13 +61,11 @@ export const useNodesStore = defineStore('nodes', () => {
       nodes.value = await window.go.main.App.GetNodes()
       await fetchStatuses()
       
-      // 如果没有选中节点，选中第一个
       if (!currentNodeId.value && nodes.value.length > 0) {
         currentNodeId.value = nodes.value[0].id
       }
     } catch (e: any) {
       error.value = e.message || '加载节点失败'
-      console.error('Failed to fetch nodes:', e)
     } finally {
       isLoading.value = false
     }
@@ -77,7 +75,7 @@ export const useNodesStore = defineStore('nodes', () => {
     try {
       statuses.value = await window.go.main.App.GetAllNodeStatuses()
     } catch (e) {
-      console.error('Failed to fetch statuses:', e)
+      // ignore
     }
   }
 
@@ -86,115 +84,72 @@ export const useNodesStore = defineStore('nodes', () => {
   }
 
   async function addNode(name: string = '新节点') {
-    try {
-      const node = await window.go.main.App.AddNode(name)
-      nodes.value.push(node)
-      currentNodeId.value = node.id
-      return node
-    } catch (e: any) {
-      error.value = e.message
-      throw e
-    }
+    const node = await window.go.main.App.AddNode(name)
+    // 对于增删操作，需要重新获取列表
+    await fetchNodes()
+    currentNodeId.value = node.id
+    return node
   }
 
   async function updateNode(node: NodeConfig) {
-    try {
-      await window.go.main.App.UpdateNode(node)
-      const index = nodes.value.findIndex(n => n.id === node.id)
-      if (index !== -1) {
-        nodes.value[index] = { ...node }
-      }
-    } catch (e: any) {
-      error.value = e.message
-      throw e
+    // 🛑【核心修复】只调用后端，不修改本地 state
+    // 修改本地 state 会导致无限循环
+    await window.go.main.App.UpdateNode(node)
+    
+    // 【可选优化】可以手动更新单个节点的属性，但不替换整个对象
+    const index = nodes.value.findIndex(n => n.id === node.id)
+    if (index !== -1) {
+        // 使用 Object.assign 保持引用不变，只更新属性
+        Object.assign(nodes.value[index], node)
     }
   }
 
   async function deleteNode(id: string) {
-    try {
-      await window.go.main.App.DeleteNode(id)
-      const index = nodes.value.findIndex(n => n.id === id)
-      if (index !== -1) {
-        nodes.value.splice(index, 1)
-      }
-      
-      // 如果删除的是当前节点，选中第一个
-      if (currentNodeId.value === id) {
-        currentNodeId.value = nodes.value[0]?.id || null
-      }
-    } catch (e: any) {
-      error.value = e.message
-      throw e
+    await window.go.main.App.DeleteNode(id)
+    // 重新获取列表
+    await fetchNodes()
+    if (currentNodeId.value === id) {
+      currentNodeId.value = nodes.value[0]?.id || null
     }
   }
 
   async function duplicateNode(id: string) {
-    try {
-      const node = await window.go.main.App.DuplicateNode(id)
-      nodes.value.push(node)
-      currentNodeId.value = node.id
-      return node
-    } catch (e: any) {
-      error.value = e.message
-      throw e
-    }
+    const node = await window.go.main.App.DuplicateNode(id)
+    // 重新获取列表
+    await fetchNodes()
+    currentNodeId.value = node.id
+    return node
   }
 
   async function startNode(id: string) {
-    try {
-      await window.go.main.App.StartNode(id)
-      updateNodeStatus(id, 'running')
-    } catch (e: any) {
-      updateNodeStatus(id, 'error')
-      throw e
-    }
+    await window.go.main.App.StartNode(id)
+    updateNodeStatus(id, 'starting')
   }
 
   async function stopNode(id: string) {
-    try {
-      await window.go.main.App.StopNode(id)
-      updateNodeStatus(id, 'stopped')
-    } catch (e: any) {
-      throw e
-    }
+    await window.go.main.App.StopNode(id)
+    updateNodeStatus(id, 'stopped')
   }
 
   async function startAllNodes() {
-    try {
-      await window.go.main.App.StartAllNodes()
-      await fetchStatuses()
-    } catch (e: any) {
-      throw e
-    }
+    await window.go.main.App.StartAllNodes()
+    await fetchStatuses()
   }
 
   async function stopAllNodes() {
-    try {
-      await window.go.main.App.StopAllNodes()
-      await fetchStatuses()
-    } catch (e: any) {
-      throw e
-    }
+    await window.go.main.App.StopAllNodes()
+    await fetchStatuses()
   }
 
   async function pingTest(id: string) {
-    try {
-      await window.go.main.App.PingTest(id)
-    } catch (e: any) {
-      throw e
-    }
+    await window.go.main.App.PingTest(id)
   }
 
   function updateNodeStatus(id: string, status: string) {
     if (statuses.value[id]) {
       statuses.value[id].status = status
     } else {
-      statuses.value[id] = {
-        node_id: id,
-        status,
-        start_time: '',
-        pid: 0
-      }
+      statuses.value[id] = { node_id: id, status, start_time: '', pid: 0 }
     }
   }
 
@@ -213,53 +168,31 @@ export const useNodesStore = defineStore('nodes', () => {
     }
     return count
   }
-
+  
   // 规则操作
   async function addRule(nodeId: string, rule: any) {
-    await window.go.main.App.AddRule(nodeId, rule)
-    await fetchNodes()
+    await window.go.main.App.AddRule(nodeId, rule);
+    // 重新获取数据以更新
+    await fetchNodes();
   }
-
+  
   async function updateRule(nodeId: string, rule: any) {
-    await window.go.main.App.UpdateRule(nodeId, rule)
-    await fetchNodes()
+    await window.go.main.App.UpdateRule(nodeId, rule);
+    await fetchNodes();
+  }
+  
+  async function deleteRule(nodeId: string, ruleId: string) {
+    await window.go.main.App.DeleteRule(nodeId, ruleId);
+    await fetchNodes();
   }
 
-  async function deleteRule(nodeId: string, ruleId: string) {
-    await window.go.main.App.DeleteRule(nodeId, ruleId)
-    await fetchNodes()
-  }
 
   return {
-    // 状态
-    nodes,
-    currentNodeId,
-    statuses,
-    isLoading,
-    error,
-    // 计算属性
-    currentNode,
-    runningNodes,
-    hasRunningNodes,
-    // 方法
-    fetchNodes,
-    fetchStatuses,
-    selectNode,
-    addNode,
-    updateNode,
-    deleteNode,
-    duplicateNode,
-    startNode,
-    stopNode,
-    startAllNodes,
-    stopAllNodes,
-    pingTest,
-    updateNodeStatus,
-    getNodeStatus,
-    exportNode,
-    importNodes,
-    addRule,
-    updateRule,
-    deleteRule
+    nodes, currentNodeId, statuses, isLoading, error,
+    currentNode, runningNodes, hasRunningNodes,
+    fetchNodes, fetchStatuses, selectNode, addNode, updateNode,
+    deleteNode, duplicateNode, startNode, stopNode, startAllNodes,
+    stopAllNodes, pingTest, updateNodeStatus, getNodeStatus,
+    exportNode, importNodes, addRule, updateRule, deleteRule
   }
 })

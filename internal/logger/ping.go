@@ -421,6 +421,8 @@ func (pm *PingManager) BatchPing(
 // =============================================================================
 
 // hideWindow 在不同平台隐藏窗口（占位，实际在 ping_windows.go 中实现）
-func hideWindow(cmd *exec.Cmd) {
-	// 默认空实现，Windows平台会覆盖
-}
+
+
+// func hideWindow(cmd *exec.Cmd) {
+// 	// 默认空实现，Windows平台会覆盖
+// }

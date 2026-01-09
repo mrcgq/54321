@@ -4,6 +4,8 @@ import { resolve } from 'path'
 
 export default defineConfig({
   plugins: [vue()],
+  // ⚠️【关键修改】强制使用相对路径，修复白屏问题
+  base: './', 
   resolve: {
     alias: {
       '@': resolve(__dirname, 'src'),

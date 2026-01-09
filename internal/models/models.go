@@ -304,3 +304,38 @@ func GetDNSModeString(mode int) string {
 		return "标准模式"
 	}
 }
+
+
+// =============================================================================
+// 改进的UUID生成
+// =============================================================================
+
+import (
+	"crypto/rand"
+	"encoding/hex"
+	// ... 其他导入
+)
+
+// GenerateUUID 生成UUID v4
+func GenerateUUID() string {
+	b := make([]byte, 16)
+	_, err := rand.Read(b)
+	if err != nil {
+		// 回退到时间戳方式
+		return time.Now().Format("20060102150405") + "-" + randomHex(8)
+	}
+
+	// 设置版本号(v4)和变体
+	b[6] = (b[6] & 0x0f) | 0x40
+	b[8] = (b[8] & 0x3f) | 0x80
+
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+}
+
+// randomHex 生成随机十六进制字符串
+func randomHex(n int) string {
+	b := make([]byte, n/2+1)
+	rand.Read(b)
+	return hex.EncodeToString(b)[:n]
+}
+

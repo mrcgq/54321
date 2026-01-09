@@ -4,7 +4,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -13,8 +12,12 @@ import (
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 
 	"xlink-wails/internal/config"
-	"xlink-wails/internal/engine" // [新增] 引入引擎包
+	"xlink-wails/internal/dns"
+	"xlink-wails/internal/engine"
+	"xlink-wails/internal/generator"
+	"xlink-wails/internal/logger"
 	"xlink-wails/internal/models"
+	"xlink-wails/internal/system"
 )
 
 // App 主应用结构
@@ -22,17 +25,20 @@ type App struct {
 	ctx   context.Context
 	state *models.AppState
 
-	// 配置管理器
-	configManager *config.Manager
+	// 各功能模块管理器
+	configManager   *config.Manager
+	configGenerator *generator.Generator
+	engineManager   *engine.Manager
+	logManager      *logger.Manager
+	pingManager     *logger.PingManager
+	dnsManager      *dns.Manager
+	tunManager      *dns.TUNManager
+	leakTester      *dns.LeakTester
+	autoStart       *system.AutoStartManager
+	notification    *system.NotificationManager
+	proxyManager    *system.ProxyManager
 
-	// 引擎管理器 [新增]
-	engineManager *engine.Manager
-
-	// 日志缓冲
-	logBuffer   []models.LogEntry
-	logBufferMu sync.Mutex
-
-	// 取消函数（用于关闭时清理）
+	// 取消函数（用于关闭时清理后台任务）
 	cancelFuncs []context.CancelFunc
 	cancelMu    sync.Mutex
 }
@@ -40,8 +46,7 @@ type App struct {
 // NewApp 创建新的应用实例
 func NewApp() *App {
 	return &App{
-		state:     models.NewAppState(),
-		logBuffer: make([]models.LogEntry, 0, 1000),
+		state: models.NewAppState(),
 	}
 }
 
@@ -53,22 +58,46 @@ func NewApp() *App {
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
 
-	// 初始化配置管理器
-	a.configManager = config.NewManager(a.state.ExeDir)
-
-	// 初始化引擎管理器 [新增]
-	a.engineManager = engine.NewManager(a.state.ExeDir)
-
-	// 设置引擎日志回调 [新增]
-	a.engineManager.SetLogCallback(func(nodeID, nodeName, level, category, message string) {
-		a.appendNodeLog(nodeID, nodeName, level, category, message)
+	// 1. 初始化日志管理器（最先初始化以便记录启动日志）
+	a.logManager = logger.NewManager(a.state.ExeDir)
+	a.logManager.SetCallback(func(entry models.LogEntry) {
+		// 实时发送日志到前端
+		runtime.EventsEmit(a.ctx, string(models.EventLogAppend), entry)
 	})
 
-	// 设置引擎状态回调 [新增]
+	a.logManager.LogSystem(logger.LevelInfo, "Xlink 客户端正在启动 v"+models.AppVersion+"...")
+
+	// 2. 初始化各子模块
+	a.pingManager = logger.NewPingManager(a.state.ExeDir, a.logManager)
+	a.configManager = config.NewManager(a.state.ExeDir)
+	a.configGenerator = generator.NewGenerator(a.state.ExeDir)
+	a.engineManager = engine.NewManager(a.state.ExeDir)
+	a.dnsManager = dns.NewManager(a.state.ExeDir)
+	a.leakTester = dns.NewLeakTester()
+	a.proxyManager = system.NewProxyManager()
+	a.notification = system.NewNotificationManager(models.AppTitle)
+
+	// 初始化 TUN 管理器 (优先使用配置中的接口名，否则默认)
+	tunName := "XlinkTUN"
+	// 注意：此时配置可能还没加载，稍后加载配置后可能需要再次确认，但在NewTUNManager中主要是结构体初始化
+	a.tunManager = dns.NewTUNManager(tunName)
+
+	// 初始化自启动管理器
+	var err error
+	a.autoStart, err = system.NewAutoStartManager("XlinkClient")
+	if err != nil {
+		a.logManager.LogSystem(logger.LevelWarn, fmt.Sprintf("自启动管理器初始化失败: %v", err))
+	}
+
+	// 3. 设置引擎回调
+	// 日志回调：将引擎日志转发到统一日志系统
+	a.engineManager.SetLogCallback(func(nodeID, nodeName, level, category, message string) {
+		a.logManager.LogNode(nodeID, nodeName, level, category, message)
+	})
+
+	// 状态回调：处理节点状态变更
 	a.engineManager.SetStatusCallback(func(nodeID, status string, err error) {
-		// 更新内存状态
 		a.state.UpdateNodeStatus(nodeID, status, "")
-		// 通知前端
 		a.emitNodeStatus(nodeID, status)
 
 		if err != nil {
@@ -77,40 +106,69 @@ func (a *App) startup(ctx context.Context) {
 			if node != nil {
 				nodeName = node.Name
 			}
-			a.appendNodeLog(nodeID, nodeName, "error", "系统", err.Error())
+			a.logManager.LogNode(nodeID, nodeName, logger.LevelError, logger.CategorySystem, err.Error())
 		}
 	})
 
-	// 加载配置
+	// 4. 设置 DNS 管理器日志回调
+	a.dnsManager.SetLogCallback(func(level, message string) {
+		a.logManager.LogSystem(level, message)
+	})
+
+	// 5. 加载用户配置
 	a.loadConfig()
 
-	// 如果是自动启动，启动所有节点
+	// 6. 处理自动启动逻辑
 	if a.state.IsAutoStart {
 		go func() {
-			time.Sleep(time.Second) // 等待UI就绪
-			a.StartAllNodes()
+			// 延迟一秒等待系统就绪
+			time.Sleep(1 * time.Second)
+			if a.state.Config.AutoStart {
+				a.logManager.LogSystem(logger.LevelInfo, "触发开机自动启动...")
+				a.StartAllNodes()
+				a.notification.Show(models.AppTitle, "已自动启动所有节点")
+			}
 		}()
 	}
 
-	// 启动日志刷新定时器
-	go a.logFlushLoop()
-
-	a.appendSystemLog("info", "系统", "Xlink 客户端已启动 v"+models.AppVersion)
+	a.logManager.LogSystem(logger.LevelInfo, "系统初始化完成")
 }
 
 // shutdown 应用关闭时调用
 func (a *App) shutdown(ctx context.Context) {
-	a.appendSystemLog("info", "系统", "正在关闭...")
+	a.logManager.LogSystem(logger.LevelInfo, "正在关闭应用...")
 
-	// 停止所有引擎 [新增]
+	// 1. 停止正在进行的 Ping 测试
+	if a.pingManager != nil {
+		a.pingManager.StopPing()
+	}
+
+	// 2. 停止所有运行中的节点引擎
 	if a.engineManager != nil {
 		a.engineManager.StopAll()
 	}
 
-	// 保存配置
+	// 3. 恢复系统代理设置 (防止退出后断网)
+	if a.proxyManager != nil {
+		if err := a.proxyManager.RestoreSystemProxy(); err != nil {
+			a.logManager.LogSystem(logger.LevelError, fmt.Sprintf("恢复系统代理失败: %v", err))
+		}
+	}
+
+	// 4. 清理临时配置文件
+	if a.configGenerator != nil {
+		a.configGenerator.CleanupAllConfigs()
+	}
+
+	// 5. 保存当前配置
 	a.saveConfig()
 
-	// 取消所有后台任务
+	// 6. 停止日志管理器 (刷新缓冲区到磁盘)
+	if a.logManager != nil {
+		a.logManager.Stop()
+	}
+
+	// 7. 取消所有上下文
 	a.cancelMu.Lock()
 	for _, cancel := range a.cancelFuncs {
 		cancel()
@@ -119,7 +177,7 @@ func (a *App) shutdown(ctx context.Context) {
 }
 
 // =============================================================================
-// 窗口控制
+// 窗口控制 API
 // =============================================================================
 
 // ShowWindow 显示主窗口
@@ -141,19 +199,19 @@ func (a *App) Quit() {
 }
 
 // =============================================================================
-// 节点管理 API（供前端调用）
+// 节点管理 API
 // =============================================================================
 
-// GetNodes 获取所有节点列表
+// GetNodes 获取所有节点列表 (包含运行时状态)
 func (a *App) GetNodes() []models.NodeConfig {
 	a.state.mu.RLock()
 	defer a.state.mu.RUnlock()
 
-	// 返回副本，包含状态信息
+	// 深拷贝节点列表，避免并发读写问题
 	nodes := make([]models.NodeConfig, len(a.state.Config.Nodes))
 	copy(nodes, a.state.Config.Nodes)
 
-	// 填充运行状态
+	// 填充运行时状态
 	for i := range nodes {
 		if es, ok := a.state.EngineStatuses[nodes[i].ID]; ok {
 			nodes[i].Status = es.Status
@@ -165,7 +223,7 @@ func (a *App) GetNodes() []models.NodeConfig {
 	return nodes
 }
 
-// GetNode 获取单个节点
+// GetNode 获取单个节点配置
 func (a *App) GetNode(id string) *models.NodeConfig {
 	return a.state.GetNode(id)
 }
@@ -182,6 +240,7 @@ func (a *App) AddNode(name string) (*models.NodeConfig, error) {
 	node := models.NewDefaultNode(name)
 	a.state.Config.Nodes = append(a.state.Config.Nodes, node)
 
+	// 异步保存并通知前端
 	go a.saveConfig()
 	a.emitEvent(models.EventConfigChanged, nil)
 
@@ -195,7 +254,7 @@ func (a *App) UpdateNode(node models.NodeConfig) error {
 
 	for i := range a.state.Config.Nodes {
 		if a.state.Config.Nodes[i].ID == node.ID {
-			// 保留运行时状态
+			// 保留运行时状态和内部端口
 			node.Status = a.state.Config.Nodes[i].Status
 			node.InternalPort = a.state.Config.Nodes[i].InternalPort
 			a.state.Config.Nodes[i] = node
@@ -214,19 +273,24 @@ func (a *App) DeleteNode(id string) error {
 	a.state.mu.Lock()
 	defer a.state.mu.Unlock()
 
-	// 检查是否正在运行
+	// 检查节点是否正在运行
 	if es, ok := a.state.EngineStatuses[id]; ok && es.Status == models.StatusRunning {
 		return fmt.Errorf("请先停止节点再删除")
 	}
 
 	for i := range a.state.Config.Nodes {
 		if a.state.Config.Nodes[i].ID == id {
+			// 删除节点
 			a.state.Config.Nodes = append(
 				a.state.Config.Nodes[:i],
 				a.state.Config.Nodes[i+1:]...,
 			)
 
+			// 清理状态
 			delete(a.state.EngineStatuses, id)
+
+			// 清理关联的临时配置文件
+			go a.configGenerator.CleanupConfigs(id)
 
 			go a.saveConfig()
 			a.emitEvent(models.EventConfigChanged, nil)
@@ -264,7 +328,7 @@ func (a *App) DuplicateNode(id string) (*models.NodeConfig, error) {
 	newNode.Name = srcNode.Name + " (副本)"
 	newNode.Status = models.StatusStopped
 
-	// 深拷贝规则
+	// 深度复制规则切片
 	newNode.Rules = make([]models.RoutingRule, len(srcNode.Rules))
 	copy(newNode.Rules, srcNode.Rules)
 
@@ -277,7 +341,7 @@ func (a *App) DuplicateNode(id string) (*models.NodeConfig, error) {
 }
 
 // =============================================================================
-// 节点控制 API [重写]
+// 节点控制 API (启动/停止/测速)
 // =============================================================================
 
 // StartNode 启动指定节点
@@ -287,17 +351,17 @@ func (a *App) StartNode(id string) error {
 		return fmt.Errorf("节点不存在: %s", id)
 	}
 
-	a.appendNodeLog(id, node.Name, "info", "系统", "正在启动...")
+	a.logManager.LogNode(id, node.Name, logger.LevelInfo, logger.CategorySystem, "正在启动...")
 
-	// 生成配置文件
+	// 1. 生成配置文件 (包含 Xlink 核心配置和可能的 Xray 配置)
 	configPath, err := a.generateNodeConfig(node)
 	if err != nil {
 		errMsg := fmt.Sprintf("生成配置失败: %v", err)
-		a.appendNodeLog(id, node.Name, "error", "系统", errMsg)
+		a.logManager.LogNode(id, node.Name, logger.LevelError, logger.CategorySystem, errMsg)
 		return fmt.Errorf(errMsg)
 	}
 
-	// 启动引擎
+	// 2. 调用引擎管理器启动进程
 	if err := a.engineManager.StartNode(node, configPath); err != nil {
 		return err
 	}
@@ -312,13 +376,12 @@ func (a *App) StopNode(id string) error {
 		return fmt.Errorf("节点不存在: %s", id)
 	}
 
-	a.appendNodeLog(id, node.Name, "info", "系统", "正在停止...")
+	a.logManager.LogNode(id, node.Name, logger.LevelInfo, logger.CategorySystem, "正在停止...")
 
-	// 调用引擎管理器停止
 	return a.engineManager.StopNode(id)
 }
 
-// StartAllNodes 启动所有节点
+// StartAllNodes 启动所有配置的节点
 func (a *App) StartAllNodes() error {
 	a.state.mu.RLock()
 	nodes := make([]models.NodeConfig, len(a.state.Config.Nodes))
@@ -328,7 +391,7 @@ func (a *App) StartAllNodes() error {
 	var lastErr error
 	for _, node := range nodes {
 		if err := a.StartNode(node.ID); err != nil {
-			a.appendSystemLog("error", "系统", fmt.Sprintf("启动节点 %s 失败: %v", node.Name, err))
+			a.logManager.LogSystem(logger.LevelError, fmt.Sprintf("启动节点 %s 失败: %v", node.Name, err))
 			lastErr = err
 		}
 	}
@@ -338,50 +401,74 @@ func (a *App) StartAllNodes() error {
 
 // StopAllNodes 停止所有节点
 func (a *App) StopAllNodes() error {
-	// 调用引擎管理器停止所有
 	a.engineManager.StopAll()
 	return nil
 }
 
-// PingTest 延迟测试
+// PingTest 对指定节点进行延迟测试
 func (a *App) PingTest(id string) error {
 	node := a.state.GetNode(id)
 	if node == nil {
 		return fmt.Errorf("节点不存在: %s", id)
 	}
 
-	a.appendNodeLog(id, node.Name, "info", "测速", "正在启动延迟测试...")
+	a.logManager.LogNode(id, node.Name, logger.LevelInfo, logger.CategoryPing, "正在启动延迟测试...")
 
 	go func() {
-		err := a.engineManager.PingTest(node, func(result models.PingResult) {
-			var msg string
-			if result.Latency >= 0 {
-				msg = fmt.Sprintf("%s - 延迟: %dms", result.Server, result.Latency)
-			} else {
-				msg = fmt.Sprintf("%s - 失败: %s", result.Server, result.Error)
-			}
-			a.appendNodeLog(id, node.Name, "info", "测速", msg)
-
-			// 发送结果到前端
-			a.emitEvent(models.EventPingResult, result)
-		})
+		err := a.pingManager.StartPing(
+			node,
+			func(result models.PingResult) {
+				// 单次结果回调
+				a.emitEvent(models.EventPingResult, result)
+			},
+			func(report logger.PingReport) {
+				// 完成报告回调
+				a.emitEvent(models.EventPingComplete, report)
+			},
+		)
 
 		if err != nil {
-			a.appendNodeLog(id, node.Name, "error", "测速", fmt.Sprintf("测速失败: %v", err))
-		} else {
-			a.appendNodeLog(id, node.Name, "info", "测速", "延迟测试完成")
+			a.logManager.LogNode(id, node.Name, logger.LevelError, logger.CategoryPing, fmt.Sprintf("测速启动失败: %v", err))
 		}
 	}()
 
 	return nil
 }
 
-// GetNodeStatus 获取节点状态 [新增]
+// StopPingTest 停止当前正在进行的 Ping 测试
+func (a *App) StopPingTest() {
+	a.pingManager.StopPing()
+}
+
+// BatchPingTest 批量测试所有节点 (Beta)
+func (a *App) BatchPingTest() error {
+	a.state.mu.RLock()
+	nodes := make([]*models.NodeConfig, len(a.state.Config.Nodes))
+	for i := range a.state.Config.Nodes {
+		nodes[i] = &a.state.Config.Nodes[i]
+	}
+	a.state.mu.RUnlock()
+
+	go func() {
+		results := a.pingManager.BatchPing(nodes, func(current, total int, result logger.BatchPingResult) {
+			a.emitEvent(models.EventPingBatchProgress, map[string]interface{}{
+				"current": current,
+				"total":   total,
+				"result":  result,
+			})
+		})
+		a.emitEvent(models.EventPingBatchComplete, results)
+	}()
+
+	return nil
+}
+
+// GetNodeStatus 获取节点运行状态字符串
 func (a *App) GetNodeStatus(id string) string {
 	return a.engineManager.GetStatus(id)
 }
 
-// GetAllNodeStatuses 获取所有节点状态 [新增]
+// GetAllNodeStatuses 获取所有节点的详细运行状态
 func (a *App) GetAllNodeStatuses() map[string]models.EngineStatus {
 	return a.engineManager.GetAllStatuses()
 }
@@ -390,7 +477,7 @@ func (a *App) GetAllNodeStatuses() map[string]models.EngineStatus {
 // 规则管理 API
 // =============================================================================
 
-// AddRule 添加分流规则
+// AddRule 为指定节点添加分流规则
 func (a *App) AddRule(nodeID string, rule models.RoutingRule) error {
 	a.state.mu.Lock()
 	defer a.state.mu.Unlock()
@@ -412,7 +499,7 @@ func (a *App) AddRule(nodeID string, rule models.RoutingRule) error {
 	return fmt.Errorf("节点不存在: %s", nodeID)
 }
 
-// UpdateRule 更新分流规则
+// UpdateRule 更新规则
 func (a *App) UpdateRule(nodeID string, rule models.RoutingRule) error {
 	a.state.mu.Lock()
 	defer a.state.mu.Unlock()
@@ -433,7 +520,7 @@ func (a *App) UpdateRule(nodeID string, rule models.RoutingRule) error {
 	return fmt.Errorf("节点不存在: %s", nodeID)
 }
 
-// DeleteRule 删除分流规则
+// DeleteRule 删除规则
 func (a *App) DeleteRule(nodeID, ruleID string) error {
 	a.state.mu.Lock()
 	defer a.state.mu.Unlock()
@@ -456,10 +543,78 @@ func (a *App) DeleteRule(nodeID, ruleID string) error {
 }
 
 // =============================================================================
+// 预设规则 API (Generator集成)
+// =============================================================================
+
+// GetPresetRules 获取指定名称的预设规则列表
+func (a *App) GetPresetRules(presetName string) []string {
+	return generator.GetPresetRules(presetName)
+}
+
+// GetAllPresets 获取所有可用预设名称
+func (a *App) GetAllPresets() []string {
+	return []string{
+		"block-ads",
+		"direct-cn",
+		"proxy-common",
+		"proxy-streaming",
+		"privacy",
+	}
+}
+
+// ApplyPreset 应用预设规则到节点
+func (a *App) ApplyPreset(nodeID, presetName string) error {
+	rules := generator.GetPresetRules(presetName)
+	if rules == nil {
+		return fmt.Errorf("预设不存在: %s", presetName)
+	}
+
+	a.state.mu.Lock()
+	defer a.state.mu.Unlock()
+
+	for i := range a.state.Config.Nodes {
+		if a.state.Config.Nodes[i].ID == nodeID {
+			for _, ruleStr := range rules {
+				// 简单的 CSV 解析: type:match,target
+				parts := strings.SplitN(ruleStr, ",", 2)
+				if len(parts) != 2 {
+					continue
+				}
+
+				rule := models.RoutingRule{
+					ID:     models.GenerateUUID(),
+					Target: parts[1],
+				}
+
+				left := parts[0]
+				switch {
+				case strings.HasPrefix(left, "geosite:"):
+					rule.Type = "geosite:"
+					rule.Match = strings.TrimPrefix(left, "geosite:")
+				case strings.HasPrefix(left, "geoip:"):
+					rule.Type = "geoip:"
+					rule.Match = strings.TrimPrefix(left, "geoip:")
+				default:
+					rule.Type = ""
+					rule.Match = left
+				}
+
+				a.state.Config.Nodes[i].Rules = append(a.state.Config.Nodes[i].Rules, rule)
+			}
+
+			go a.saveConfig()
+			return nil
+		}
+	}
+
+	return fmt.Errorf("节点不存在: %s", nodeID)
+}
+
+// =============================================================================
 // 导入导出 API
 // =============================================================================
 
-// ImportFromClipboard 从剪贴板导入
+// ImportFromClipboard 从剪贴板导入节点 (支持 xlink:// 协议)
 func (a *App) ImportFromClipboard() (int, error) {
 	text, err := runtime.ClipboardGetText(a.ctx)
 	if err != nil {
@@ -471,21 +626,19 @@ func (a *App) ImportFromClipboard() (int, error) {
 		return 0, err
 	}
 
-	// 更新状态
 	a.state.mu.Lock()
 	a.state.Config = a.configManager.GetConfig()
 	a.state.mu.Unlock()
 
-	// 保存并通知前端
 	go a.saveConfig()
 	a.emitEvent(models.EventConfigChanged, nil)
 
-	a.appendSystemLog("info", "系统", fmt.Sprintf("成功导入 %d 个节点", len(imported)))
+	a.logManager.LogSystem(logger.LevelInfo, fmt.Sprintf("成功导入 %d 个节点", len(imported)))
 
 	return len(imported), nil
 }
 
-// ExportToClipboard 导出节点到剪贴板
+// ExportToClipboard 导出单个节点到剪贴板
 func (a *App) ExportToClipboard(id string) error {
 	uri, err := a.configManager.ExportNode(id)
 	if err != nil {
@@ -496,7 +649,7 @@ func (a *App) ExportToClipboard(id string) error {
 		return fmt.Errorf("写入剪贴板失败: %v", err)
 	}
 
-	a.appendSystemLog("info", "系统", "配置已复制到剪贴板")
+	a.logManager.LogSystem(logger.LevelInfo, "配置已复制到剪贴板")
 	return nil
 }
 
@@ -523,7 +676,7 @@ func (a *App) ExportAllToClipboard() error {
 		return fmt.Errorf("写入剪贴板失败: %v", err)
 	}
 
-	a.appendSystemLog("info", "系统", fmt.Sprintf("已导出 %d 个节点到剪贴板", len(uris)))
+	a.logManager.LogSystem(logger.LevelInfo, fmt.Sprintf("已导出 %d 个节点到剪贴板", len(uris)))
 	return nil
 }
 
@@ -531,43 +684,43 @@ func (a *App) ExportAllToClipboard() error {
 // 备份管理 API
 // =============================================================================
 
-// ListBackups 列出所有备份
+// ListBackups 列出所有配置文件备份
 func (a *App) ListBackups() []string {
 	return a.configManager.ListBackups()
 }
 
-// RestoreBackup 从备份恢复
+// RestoreBackup 从备份恢复配置
 func (a *App) RestoreBackup(backupName string) error {
 	if err := a.configManager.RestoreBackup(backupName); err != nil {
 		return err
 	}
 
-	// 重新加载配置
+	// 重新加载到内存
 	a.state.mu.Lock()
 	a.state.Config = a.configManager.GetConfig()
 	a.state.mu.Unlock()
 
 	a.emitEvent(models.EventConfigChanged, nil)
-	a.appendSystemLog("info", "系统", fmt.Sprintf("已从备份恢复: %s", backupName))
+	a.logManager.LogSystem(logger.LevelInfo, fmt.Sprintf("已从备份恢复: %s", backupName))
 
 	return nil
 }
 
 // =============================================================================
-// 设置 API
+// 设置管理 API
 // =============================================================================
 
-// GetSettings 获取应用设置
+// GetSettings 获取全局设置
 func (a *App) GetSettings() models.AppConfig {
 	a.state.mu.RLock()
 	defer a.state.mu.RUnlock()
 	return *a.state.Config
 }
 
-// UpdateSettings 更新应用设置
+// UpdateSettings 更新全局设置
 func (a *App) UpdateSettings(cfg models.AppConfig) error {
 	a.state.mu.Lock()
-	// 保留节点列表
+	// 保持节点列表不变，只更新设置项
 	cfg.Nodes = a.state.Config.Nodes
 	a.state.Config = &cfg
 	a.state.mu.Unlock()
@@ -576,8 +729,23 @@ func (a *App) UpdateSettings(cfg models.AppConfig) error {
 	return nil
 }
 
-// SetAutoStart 设置开机自启
+// SetAutoStart 设置开机自启动
 func (a *App) SetAutoStart(enabled bool) error {
+	if a.autoStart == nil {
+		return fmt.Errorf("自动启动管理器未初始化")
+	}
+
+	var err error
+	if enabled {
+		err = a.autoStart.Enable()
+	} else {
+		err = a.autoStart.Disable()
+	}
+
+	if err != nil {
+		return err
+	}
+
 	a.state.mu.Lock()
 	a.state.Config.AutoStart = enabled
 	a.state.mu.Unlock()
@@ -586,178 +754,236 @@ func (a *App) SetAutoStart(enabled bool) error {
 	return nil
 }
 
-// GetAutoStart 获取开机自启状态
+// GetAutoStart 获取当前开机自启状态
 func (a *App) GetAutoStart() bool {
-	a.state.mu.RLock()
-	defer a.state.mu.RUnlock()
-	return a.state.Config.AutoStart
+	if a.autoStart == nil {
+		return false
+	}
+	return a.autoStart.IsEnabled()
 }
 
 // =============================================================================
-// 配置文件路径 API
+// DNS 防泄露 API
 // =============================================================================
 
-// GetConfigPath 获取配置文件路径
-func (a *App) GetConfigPath() string {
-	return filepath.Join(a.state.ExeDir, config.ConfigFileName)
+// GetDNSModes 获取支持的 DNS 模式列表
+func (a *App) GetDNSModes() []map[string]interface{} {
+	return []map[string]interface{}{
+		{
+			"value":       models.DNSModeStandard,
+			"label":       "标准模式",
+			"description": "使用系统默认DNS，可能泄露",
+			"recommended": false,
+		},
+		{
+			"value":       models.DNSModeFakeIP,
+			"label":       "Fake-IP 模式",
+			"description": "本地返回虚假IP，域名通过代理解析，有效防止泄露",
+			"recommended": true,
+		},
+		{
+			"value":       models.DNSModeTUN,
+			"label":       "TUN 全局接管",
+			"description": "创建虚拟网卡接管所有流量，需要管理员权限",
+			"recommended": false,
+		},
+	}
 }
 
-// OpenConfigFolder 打开配置文件所在文件夹
-func (a *App) OpenConfigFolder() error {
-	return runtime.BrowserOpenURL(a.ctx, a.state.ExeDir)
-}
+// TestDNSLeak 执行 DNS 泄露测试
+func (a *App) TestDNSLeak() (*dns.LeakTestResult, error) {
+	a.logManager.LogSystem(logger.LevelInfo, "开始 DNS 泄露测试...")
 
-// =============================================================================
-// 日志系统
-// =============================================================================
-
-// GetLogs 获取日志（分页）
-func (a *App) GetLogs(limit int) []models.LogEntry {
-	a.logBufferMu.Lock()
-	defer a.logBufferMu.Unlock()
-
-	if limit <= 0 || limit > len(a.logBuffer) {
-		limit = len(a.logBuffer)
+	result, err := a.leakTester.RunTest()
+	if err != nil {
+		a.logManager.LogSystem(logger.LevelError, fmt.Sprintf("DNS 泄露测试失败: %v", err))
+		return nil, err
 	}
 
-	start := len(a.logBuffer) - limit
-	if start < 0 {
-		start = 0
+	if result.Leaked {
+		a.logManager.LogSystem(logger.LevelWarn, "⚠️ 检测到 DNS 泄露!")
+	} else {
+		a.logManager.LogSystem(logger.LevelInfo, "✓ DNS 未泄露")
 	}
 
-	result := make([]models.LogEntry, limit)
-	copy(result, a.logBuffer[start:])
+	a.logManager.LogSystem(logger.LevelInfo, result.Conclusion)
+
+	return result, nil
+}
+
+// QuickDNSLeakCheck 快速 DNS/IP 检查
+func (a *App) QuickDNSLeakCheck(nodeID string) (map[string]interface{}, error) {
+	node := a.state.GetNode(nodeID)
+	if node == nil {
+		return nil, fmt.Errorf("节点不存在")
+	}
+
+	// 使用节点的监听地址作为代理进行测试
+	isChina, ip, err := a.leakTester.QuickLeakCheck(node.Listen)
+	if err != nil {
+		return nil, err
+	}
+
+	return map[string]interface{}{
+		"ip":        ip,
+		"is_leaked": isChina,
+		"message":   fmt.Sprintf("检测IP: %s (中国IP: %v)", ip, isChina),
+	}, nil
+}
+
+// IsTUNSupported 检查系统是否支持 TUN 模式
+func (a *App) IsTUNSupported() map[string]interface{} {
+	result := map[string]interface{}{
+		"supported":     false,
+		"is_admin":      false,
+		"driver_exists": false,
+		"message":       "",
+	}
+
+	result["is_admin"] = a.tunManager.IsAdministrator()
+	result["driver_exists"] = a.tunManager.CheckWintunDriver(a.state.ExeDir)
+
+	if result["is_admin"].(bool) && result["driver_exists"].(bool) {
+		result["supported"] = true
+		result["message"] = "TUN 模式可用"
+	} else {
+		if !result["is_admin"].(bool) {
+			result["message"] = "需要以管理员身份运行"
+		} else if !result["driver_exists"].(bool) {
+			result["message"] = "缺少 wintun.dll 驱动"
+		}
+	}
 
 	return result
 }
 
+// UpdateDNSConfig 更新节点的 DNS 配置
+func (a *App) UpdateDNSConfig(nodeID string, mode int, enableSniffing bool) error {
+	a.state.mu.Lock()
+	defer a.state.mu.Unlock()
+
+	for i := range a.state.Config.Nodes {
+		if a.state.Config.Nodes[i].ID == nodeID {
+			a.state.Config.Nodes[i].DNSMode = mode
+			a.state.Config.Nodes[i].EnableSniffing = enableSniffing
+
+			go a.saveConfig()
+			a.logManager.LogSystem(logger.LevelInfo,
+				fmt.Sprintf("节点 %s DNS模式已更新: %s",
+					a.state.Config.Nodes[i].Name,
+					models.GetDNSModeString(mode)))
+			return nil
+		}
+	}
+	return fmt.Errorf("节点不存在")
+}
+
+// ClearFakeIPCache 清空 Fake-IP 映射缓存
+func (a *App) ClearFakeIPCache() {
+	a.dnsManager.ClearFakeIPCache()
+	a.logManager.LogSystem(logger.LevelInfo, "Fake-IP 缓存已清空")
+}
+
+// FlushDNSCache 刷新系统 DNS 缓存
+func (a *App) FlushDNSCache() error {
+	err := a.tunManager.FlushDNSCache()
+	if err == nil {
+		a.logManager.LogSystem(logger.LevelInfo, "系统 DNS 缓存已刷新")
+	} else {
+		a.logManager.LogSystem(logger.LevelError, fmt.Sprintf("刷新 DNS 缓存失败: %v", err))
+	}
+	return err
+}
+
+// =============================================================================
+// 日志系统 API
+// =============================================================================
+
+// GetLogs 获取日志 (支持分页)
+func (a *App) GetLogs(limit int) []models.LogEntry {
+	return a.logManager.GetLogs(limit)
+}
+
+// GetLogsByNode 获取指定节点的日志
+func (a *App) GetLogsByNode(nodeID string, limit int) []models.LogEntry {
+	return a.logManager.GetLogsByNode(nodeID, limit)
+}
+
 // ClearLogs 清空日志
 func (a *App) ClearLogs() {
-	a.logBufferMu.Lock()
-	a.logBuffer = a.logBuffer[:0]
-	a.logBufferMu.Unlock()
+	a.logManager.Clear()
 }
 
-// appendSystemLog 追加系统日志
-func (a *App) appendSystemLog(level, category, message string) {
-	a.appendLog(models.LogEntry{
-		Timestamp: time.Now(),
-		NodeID:    "",
-		NodeName:  "系统",
-		Level:     level,
-		Category:  category,
-		Message:   message,
+// ExportLogs 导出日志到文件
+func (a *App) ExportLogs(format string) (string, error) {
+	timestamp := time.Now().Format("20060102_150405")
+	filename := fmt.Sprintf("xlink_logs_%s.%s", timestamp, format)
+
+	path, err := runtime.SaveFileDialog(a.ctx, runtime.SaveDialogOptions{
+		DefaultFilename: filename,
+		Filters: []runtime.FileFilter{
+			{DisplayName: "日志文件", Pattern: "*." + format},
+		},
 	})
-}
 
-// appendNodeLog 追加节点日志
-func (a *App) appendNodeLog(nodeID, nodeName, level, category, message string) {
-	a.appendLog(models.LogEntry{
-		Timestamp: time.Now(),
-		NodeID:    nodeID,
-		NodeName:  nodeName,
-		Level:     level,
-		Category:  category,
-		Message:   message,
-	})
-}
-
-// appendLog 追加日志到缓冲区
-func (a *App) appendLog(entry models.LogEntry) {
-	a.logBufferMu.Lock()
-	defer a.logBufferMu.Unlock()
-
-	// 限制缓冲区大小
-	if len(a.logBuffer) >= 10000 {
-		a.logBuffer = a.logBuffer[1000:]
+	if err != nil || path == "" {
+		return "", err
 	}
 
-	a.logBuffer = append(a.logBuffer, entry)
-}
-
-// logFlushLoop 定期刷新日志到前端
-func (a *App) logFlushLoop() {
-	ticker := time.NewTicker(100 * time.Millisecond)
-	defer ticker.Stop()
-
-	lastLen := 0
-	for {
-		select {
-		case <-ticker.C:
-			a.logBufferMu.Lock()
-			currentLen := len(a.logBuffer)
-			if currentLen > lastLen {
-				// 发送新日志
-				newLogs := a.logBuffer[lastLen:]
-				for _, log := range newLogs {
-					a.emitEvent(models.EventLogAppend, log)
-				}
-				lastLen = currentLen
-			}
-			a.logBufferMu.Unlock()
-		case <-a.ctx.Done():
-			return
-		}
-	}
-}
-
-// =============================================================================
-// 事件系统
-// =============================================================================
-
-// emitEvent 发送事件到前端
-func (a *App) emitEvent(eventType models.EventType, payload interface{}) {
-	runtime.EventsEmit(a.ctx, string(eventType), payload)
-}
-
-// emitNodeStatus 发送节点状态更新
-func (a *App) emitNodeStatus(nodeID, status string) {
-	a.emitEvent(models.EventNodeStatus, map[string]string{
-		"node_id": nodeID,
-		"status":  status,
-	})
-}
-
-// =============================================================================
-// 配置持久化
-// =============================================================================
-
-// loadConfig 加载配置
-func (a *App) loadConfig() {
-	cfg, err := a.configManager.Load()
-	if err != nil {
-		a.appendSystemLog("error", "系统", fmt.Sprintf("加载配置失败: %v", err))
-		// 使用默认配置
-		cfg = &models.AppConfig{
-			Nodes: []models.NodeConfig{
-				models.NewDefaultNode("默认节点"),
-			},
-			Theme:    "system",
-			Language: "zh-CN",
-		}
+	if err := a.logManager.ExportToFile(path, format); err != nil {
+		return "", err
 	}
 
-	a.state.mu.Lock()
-	a.state.Config = cfg
-	a.state.mu.Unlock()
-
-	a.appendSystemLog("info", "系统", fmt.Sprintf("已加载 %d 个节点配置", len(cfg.Nodes)))
+	return path, nil
 }
 
-// saveConfig 保存配置
-func (a *App) saveConfig() {
-	a.state.mu.RLock()
-	a.configManager.UpdateConfig(a.state.Config)
-	a.state.mu.RUnlock()
+// OpenLogFolder 打开日志文件夹
+func (a *App) OpenLogFolder() error {
+	return system.OpenFolder(a.logManager.GetLogDir())
+}
 
-	if err := a.configManager.Save(); err != nil {
-		a.appendSystemLog("error", "系统", fmt.Sprintf("保存配置失败: %v", err))
+// =============================================================================
+// 系统工具 API
+// =============================================================================
+
+// OpenConfigFolder 打开配置文件所在文件夹
+func (a *App) OpenConfigFolder() error {
+	return system.OpenFolder(a.state.ExeDir)
+}
+
+// GetSystemInfo 获取系统信息
+func (a *App) GetSystemInfo() system.SystemInfo {
+	return system.GetSystemInfo()
+}
+
+// SetSystemProxy 设置系统代理
+func (a *App) SetSystemProxy(nodeID string) error {
+	node := a.state.GetNode(nodeID)
+	if node == nil {
+		return fmt.Errorf("节点不存在")
 	}
+
+	// 解析监听地址
+	parts := strings.Split(node.Listen, ":")
+	if len(parts) != 2 {
+		return fmt.Errorf("监听地址格式错误")
+	}
+
+	var port int
+	fmt.Sscanf(parts[1], "%d", &port)
+
+	return a.proxyManager.SetSystemProxy(parts[0], port)
 }
 
-// =============================================================================
-// 版本信息
-// =============================================================================
+// ClearSystemProxy 清除系统代理
+func (a *App) ClearSystemProxy() error {
+	return a.proxyManager.ClearSystemProxy()
+}
+
+// ShowNotification 显示系统通知
+func (a *App) ShowNotification(title, message string) error {
+	return a.notification.Show(title, message)
+}
 
 // GetVersion 获取版本信息
 func (a *App) GetVersion() string {
@@ -770,155 +996,95 @@ func (a *App) GetAppTitle() string {
 }
 
 // =============================================================================
-// 配置文件生成（临时占位，步骤4完整实现）
+// 内部私有方法
 // =============================================================================
 
-// generateNodeConfig 生成节点配置文件
+// loadConfig 加载配置 (带错误处理和默认值)
+func (a *App) loadConfig() {
+	cfg, err := a.configManager.Load()
+	if err != nil {
+		a.logManager.LogSystem(logger.LevelError, fmt.Sprintf("加载配置失败: %v", err))
+		// 创建默认配置
+		cfg = &models.AppConfig{
+			Nodes: []models.NodeConfig{
+				models.NewDefaultNode("默认节点"),
+			},
+			Theme:         "system",
+			Language:      "zh-CN",
+			GlobalDNSMode: models.DNSModeFakeIP,
+		}
+	}
+
+	a.state.mu.Lock()
+	a.state.Config = cfg
+	a.state.mu.Unlock()
+
+	a.logManager.LogSystem(logger.LevelInfo, fmt.Sprintf("已加载 %d 个节点配置", len(cfg.Nodes)))
+}
+
+// saveConfig 保存配置
+func (a *App) saveConfig() {
+	a.state.mu.RLock()
+	a.configManager.UpdateConfig(a.state.Config)
+	a.state.mu.RUnlock()
+
+	if err := a.configManager.Save(); err != nil {
+		a.logManager.LogSystem(logger.LevelError, fmt.Sprintf("保存配置失败: %v", err))
+	}
+}
+
+// generateNodeConfig 生成节点配置文件 (集成 Generator 和 DNS Manager)
 func (a *App) generateNodeConfig(node *models.NodeConfig) (string, error) {
-	// 确定监听地址
+	// 1. 验证配置有效性
+	if err := a.configGenerator.ValidateNodeConfig(node); err != nil {
+		return "", err
+	}
+
+	// 2. 确定监听地址 (智能分流模式下，Xlink 监听随机内部端口)
 	listenAddr := node.Listen
 	if node.RoutingMode == models.RoutingModeSmart {
-		// 智能分流模式，Xlink监听内部端口
 		node.InternalPort = a.engineManager.FindFreePort()
 		listenAddr = fmt.Sprintf("127.0.0.1:%d", node.InternalPort)
 	}
 
-	// 生成Xlink配置
-	configPath := filepath.Join(a.state.ExeDir, fmt.Sprintf("config_core_%s.json", node.ID))
-
-	// 准备服务器列表
-	servers := strings.ReplaceAll(node.Server, "\r\n", ";")
-	servers = strings.ReplaceAll(servers, "\n", ";")
-
-	// 准备Token
-	tokenStr := node.SecretKey
-	if node.FallbackIP != "" {
-		tokenStr = node.SecretKey + "|" + node.FallbackIP
+	// 3. 生成 Xlink 核心配置
+	xlinkConfigPath, err := a.configGenerator.GenerateXlinkConfig(node, listenAddr)
+	if err != nil {
+		return "", fmt.Errorf("生成Xlink配置失败: %w", err)
 	}
 
-	// 策略
-	strategy := models.GetStrategyString(node.StrategyMode)
-
-	// 序列化规则
-	var rulesStr string
-	for _, r := range node.Rules {
-		if rulesStr != "" {
-			rulesStr += "\\r\\n"
-		}
-		rulesStr += r.Type + r.Match + "," + r.Target
-	}
-
-	// 写入配置文件
-	configJSON := fmt.Sprintf(`{
-  "inbounds": [{"tag": "socks-in", "listen": "%s", "protocol": "socks"}],
-  "outbounds": [{
-    "tag": "proxy",
-    "protocol": "ech-proxy",
-    "settings": {
-      "server": "%s",
-      "server_ip": "%s",
-      "token": "%s",
-      "strategy": "%s",
-      "rules": "%s",
-      "global_keep_alive": false,
-      "s5": "%s"
-    }
-  }]
-}`, listenAddr, servers, node.IP, tokenStr, strategy, rulesStr, node.Socks5)
-
-	if err := os.WriteFile(configPath, []byte(configJSON), 0644); err != nil {
-		return "", fmt.Errorf("写入配置文件失败: %w", err)
-	}
-
-	// 如果是智能分流模式，生成Xray配置
+	// 4. 如果是智能分流模式，生成 Xray 前端配置
 	if node.RoutingMode == models.RoutingModeSmart {
-		xrayConfigPath := filepath.Join(a.state.ExeDir, fmt.Sprintf("config_xray_%s.json", node.ID))
-		if err := a.generateXrayConfig(node, xrayConfigPath); err != nil {
-			return "", err
+		xrayConfigPath := filepath.Join(a.state.ExeDir, fmt.Sprintf(generator.XrayConfigTemplate, node.ID))
+
+		// 检查 Geo 数据库文件是否存在
+		hasGeosite := a.dnsManager.FileExists("geosite.dat")
+		hasGeoip := a.dnsManager.FileExists("geoip.dat")
+
+		// 生成完整的 Xray 配置 (包含 DNS 防泄露、路由、Inbound/Outbound)
+		config, err := a.dnsManager.GenerateFullXrayConfig(node, node.InternalPort, hasGeosite, hasGeoip)
+		if err != nil {
+			return "", fmt.Errorf("生成Xray配置结构失败: %w", err)
+		}
+
+		// 写入配置文件
+		if err := a.dnsManager.WriteXrayConfig(config, xrayConfigPath); err != nil {
+			return "", fmt.Errorf("写入Xray配置文件失败: %w", err)
 		}
 	}
 
-	return configPath, nil
+	return xlinkConfigPath, nil
 }
 
-// generateXrayConfig 生成Xray配置文件
-func (a *App) generateXrayConfig(node *models.NodeConfig, configPath string) error {
-	// 解析监听地址
-	listenHost := "127.0.0.1"
-	listenPort := "10808"
-
-	if idx := strings.LastIndex(node.Listen, ":"); idx != -1 {
-		listenHost = node.Listen[:idx]
-		listenPort = node.Listen[idx+1:]
-	}
-
-	// 检查geo文件
-	hasGeosite := fileExists(filepath.Join(a.state.ExeDir, "geosite.dat"))
-	hasGeoip := fileExists(filepath.Join(a.state.ExeDir, "geoip.dat"))
-
-	// 构建配置
-	var rules []string
-
-	// 用户自定义规则
-	for _, r := range node.Rules {
-		if r.Type == "geosite:" || r.Type == "geoip:" {
-			outbound := "proxy_out"
-			if strings.Contains(r.Target, "direct") {
-				outbound = "direct"
-			} else if strings.Contains(r.Target, "block") {
-				outbound = "block"
-			}
-
-			matcher := "domain"
-			if r.Type == "geoip:" {
-				matcher = "ip"
-			}
-
-			rules = append(rules, fmt.Sprintf(
-				`      { "type": "field", "outboundTag": "%s", "%s": ["%s%s"] }`,
-				outbound, matcher, r.Type, r.Match,
-			))
-		}
-	}
-
-	// 默认规则
-	if hasGeosite {
-		rules = append(rules, `      { "type": "field", "outboundTag": "block", "domain": ["geosite:category-ads-all"] }`)
-	}
-	rules = append(rules, `      { "type": "field", "outboundTag": "block", "protocol": ["bittorrent"] }`)
-	if hasGeoip {
-		rules = append(rules, `      { "type": "field", "outboundTag": "direct", "ip": ["geoip:private", "geoip:cn"] }`)
-	}
-	if hasGeosite {
-		rules = append(rules, `      { "type": "field", "outboundTag": "direct", "domain": ["geosite:cn"] }`)
-	}
-
-	rulesStr := strings.Join(rules, ",\n")
-
-	configJSON := fmt.Sprintf(`{
-  "log": { "loglevel": "warning" },
-  "inbounds": [{
-    "listen": "%s", "port": %s, "protocol": "socks",
-    "settings": {"auth": "noauth", "udp": true, "ip": "127.0.0.1"}
-  }],
-  "outbounds": [
-    { "protocol": "socks", "settings": { "servers": [ {"address": "127.0.0.1", "port": %d} ] }, "tag": "proxy_out" },
-    { "protocol": "freedom", "tag": "direct" },
-    { "protocol": "blackhole", "tag": "block" }
-  ],
-  "routing": {
-    "domainStrategy": "AsIs",
-    "rules": [
-%s
-    ]
-  }
-}`, listenHost, listenPort, node.InternalPort, rulesStr)
-
-	return os.WriteFile(configPath, []byte(configJSON), 0644)
+// emitEvent 辅助方法：发送事件到前端
+func (a *App) emitEvent(eventType models.EventType, payload interface{}) {
+	runtime.EventsEmit(a.ctx, string(eventType), payload)
 }
 
-// fileExists 检查文件是否存在
-func fileExists(path string) bool {
-	_, err := os.Stat(path)
-	return err == nil
+// emitNodeStatus 辅助方法：发送节点状态更新
+func (a *App) emitNodeStatus(nodeID, status string) {
+	a.emitEvent(models.EventNodeStatus, map[string]string{
+		"node_id": nodeID,
+		"status":  status,
+	})
 }

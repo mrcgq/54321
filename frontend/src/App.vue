@@ -12,9 +12,9 @@
       <main class="flex-1 flex flex-col overflow-hidden">
         <!-- 节点配置编辑器 -->
         <div class="flex-1 overflow-auto p-4">
-          <NodeEditor v-if="currentNode" :node="currentNode" />
+          <!-- ⚠️ KEY FIX: :key forces component re-creation on node change -->
+          <NodeEditor v-if="currentNode" :node="currentNode" :key="currentNode.id" />
           
-          <!-- 空状态 (直接内联，避免 defineComponent 问题) -->
           <div v-else class="h-full flex items-center justify-center text-gray-500 dark:text-gray-400">
             <div class="text-center">
               <svg class="w-16 h-16 mx-auto mb-4 text-gray-300 dark:text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -79,66 +79,45 @@ import { useNodesStore } from '@/stores/nodes'
 import { useLogsStore } from '@/stores/logs'
 import { useWailsEvent } from '@/composables/useWails'
 
-// 组件导入
 import AppHeader from '@/components/layout/AppHeader.vue'
 import AppSidebar from '@/components/layout/AppSidebar.vue'
 import NodeEditor from '@/components/nodes/NodeEditor.vue'
 import LogViewer from '@/components/logs/LogViewer.vue'
 import GeneralSettings from '@/components/settings/GeneralSettings.vue'
 
-// Store 实例
 const appStore = useAppStore()
 const nodesStore = useNodesStore()
 const logsStore = useLogsStore()
 
-// 响应式状态
 const showSettings = ref(false)
-
-// 计算属性
 const currentNode = computed(() => nodesStore.currentNode)
 const toasts = computed(() => appStore.toasts)
 const isLoading = computed(() => appStore.isLoading)
 
-// =============================================================================
-// Wails 事件监听 (后端 -> 前端)
-// =============================================================================
-
-// 监听节点状态变化 (启动/停止/错误)
+// Events
 useWailsEvent('node:status', (data: { node_id: string; status: string }) => {
   nodesStore.updateNodeStatus(data.node_id, data.status)
 })
 
-// 监听实时日志追加
 useWailsEvent('log:append', (entry: any) => {
   logsStore.addLog(entry)
 })
 
-// 监听配置变更 (如导入/删除后)
 useWailsEvent('config:changed', () => {
   nodesStore.fetchNodes()
 })
 
-// 监听单次 Ping 结果 (可选：如果在 UI 上显示实时延迟动画)
 useWailsEvent('ping:result', (result: any) => {
   // console.debug('Ping result:', result)
 })
 
-// =============================================================================
-// 生命周期
-// =============================================================================
-
 onMounted(async () => {
   appStore.setLoading(true)
-  
   try {
-    // 1. 初始化数据
     await Promise.all([
-      nodesStore.fetchNodes(), // 获取节点列表
-      logsStore.fetchLogs()    // 获取历史日志
+      nodesStore.fetchNodes(),
+      logsStore.fetchLogs()
     ])
-    
-    // 2. 注意：移除了 logsStore.initEventListener()，避免重复监听
-    
   } catch (e: any) {
     appStore.showToast('error', '应用初始化失败: ' + e.message)
     console.error('Initialization failed:', e)
@@ -149,12 +128,10 @@ onMounted(async () => {
 </script>
 
 <style>
-/* 全局过渡动画定义 */
 .fade-enter-active,
 .fade-leave-active {
   transition: opacity 0.2s ease;
 }
-
 .fade-enter-from,
 .fade-leave-to {
   opacity: 0;

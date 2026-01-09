@@ -192,7 +192,7 @@ type Event struct {
 
 // AppState 全局应用状态（线程安全）
 type AppState struct {
-	mu             sync.RWMutex
+	Mu             sync.RWMutex // 【重要修改】改为导出字段 Mu (首字母大写)
 	Config         *AppConfig
 	EngineStatuses map[string]*EngineStatus // key: NodeID
 	CurrentNodeID  string
@@ -217,8 +217,8 @@ func NewAppState() *AppState {
 
 // GetNode 获取节点（线程安全）
 func (s *AppState) GetNode(id string) *NodeConfig {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.Mu.RLock() // 修改为 Mu
+	defer s.Mu.RUnlock() // 修改为 Mu
 	for i := range s.Config.Nodes {
 		if s.Config.Nodes[i].ID == id {
 			return &s.Config.Nodes[i]
@@ -229,8 +229,8 @@ func (s *AppState) GetNode(id string) *NodeConfig {
 
 // GetNodeByIndex 通过索引获取节点
 func (s *AppState) GetNodeByIndex(index int) *NodeConfig {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.Mu.RLock() // 修改为 Mu
+	defer s.Mu.RUnlock() // 修改为 Mu
 	if index >= 0 && index < len(s.Config.Nodes) {
 		return &s.Config.Nodes[index]
 	}
@@ -239,8 +239,8 @@ func (s *AppState) GetNodeByIndex(index int) *NodeConfig {
 
 // UpdateNodeStatus 更新节点状态
 func (s *AppState) UpdateNodeStatus(nodeID, status string, errMsg string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.Mu.Lock() // 修改为 Mu
+	defer s.Mu.Unlock() // 修改为 Mu
 	if es, ok := s.EngineStatuses[nodeID]; ok {
 		es.Status = status
 		es.ErrorMessage = errMsg

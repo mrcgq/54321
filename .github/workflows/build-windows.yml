@@ -3,74 +3,78 @@ name: Build Xlink Windows Client
 
 # 触发工作流程的事件
 on:
-  # 1. 当代码推送到 main 分支时触发
   push:
     branches: [ "main" ]
-  # 2. 当发布一个以 "v" 开头的标签时触发 (例如 v1.0.0)
   release:
     types: [published]
-  # 3. 允许在 GitHub Actions 页面手动触发此工作流程
   workflow_dispatch:
 
 # 定义工作流程中的任务 (Jobs)
 jobs:
-  # 只有一个任务，名为 "build"
   build:
     # 指定运行此任务的虚拟机环境
-    runs-on: windows-latest # 使用最新的 Windows 环境
+    runs-on: windows-latest
 
     # 定义任务中的步骤 (Steps)
     steps:
       # 步骤 1: 检出代码
-      # 使用官方的 actions/checkout@v4 操作来获取你的仓库代码
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # 步骤 2: 设置 Wails 环境
-      # 这是最关键的一步，使用 Wails 官方提供的 Action
-      - name: Setup Wails environment
-        uses: wailsapp/action-wails@v2 # <--- 已修正
+      # 步骤 2: 设置 Node.js 环境 (前端构建需要)
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
         with:
-          # 指定要安装的 Wails CLI 版本，建议与你本地开发版本保持一致
-          wails-version: 'v2.8.0' 
-          # 指定 Go 版本
-          go-version: '1.21'
-          # 指定 NSIS 版本，用于创建安装程序 (可选)
-          nsis-version: '3.08'
+          node-version: 20
 
-      # 步骤 3: 构建 Wails 应用程序
-      # -platform windows/amd64 指定构建 Windows 64位版本
-      # -ldflags "-H windowsgui" 用于隐藏 Windows 上的命令行窗口
+      # 步骤 3: 设置 Go 环境 (后端构建需要)
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+          # 缓存依赖以加快构建速度
+          cache: true 
+
+      # 步骤 4: 直接安装 Wails CLI 工具 (最稳妥的方式)
+      - name: Install Wails CLI
+        run: go install github.com/wailsapp/wails/v2/cmd/wails@latest
+
+      # 步骤 5: 构建 Wails 应用程序
       - name: Build Wails application
+        # 此时 wails 已经安装到环境变量中了，直接调用
         run: wails build -platform windows/amd64 -ldflags "-H windowsgui -s -w"
 
-      # 步骤 4: 准备打包资源 (处理内核文件)
+      # 步骤 6: 准备打包资源 (处理内核文件)
       - name: Prepare packaging resources
         run: |
-          # 创建一个目录来存放最终的打包文件
-          mkdir release
+          # 创建 release 目录
+          if (-not (Test-Path release)) { mkdir release }
           
-          # 将构建好的 exe 复制到 release 目录
-          cp build/bin/xlink-client.exe release/
+          # 复制构建好的 exe
+          Copy-Item build/bin/xlink-client.exe -Destination release/
           
-          # --- 关键部分：下载运行时资源 ---
-          # 请将下面的 URL 替换为你自己的实际下载链接！
+          # --- ⚠️⚠️⚠️ 关键修改：内核文件下载 ⚠️⚠️⚠️ ---
+          # 这里的 URL 必须替换成您真实有效的直链！
+          # 如果您暂时没有上传，为了防止构建报错，我先注释掉了下载命令。
+          # 等您上传了 Release Assets 后，请取消注释并填入真实 URL。
           
-          echo "Downloading runtime resources..."
-          iwr -Uri "https://YOUR_DOWNLOAD_LINK/xlink-cli-binary.exe" -OutFile "release/xlink-cli-binary.exe"
-          iwr -Uri "https://YOUR_DOWNLOAD_LINK/xray.exe" -OutFile "release/xray.exe"
-          iwr -Uri "https://YOUR_DOWNLOAD_LINK/wintun.dll" -OutFile "release/wintun.dll"
-          iwr -Uri "https://YOUR_DOWNLOAD_LINK/geosite.dat" -OutFile "release/geosite.dat"
-          iwr -Uri "https://YOUR_DOWNLOAD_LINK/geoip.dat" -OutFile "release/geoip.dat"
+          echo "Downloading runtime resources (Skipped for now, please configure URLs)..."
+          
+          # iwr -Uri "https://github.com/mrcgq/54321/releases/download/v0.0.1/xlink-cli-binary.exe" -OutFile "release/xlink-cli-binary.exe"
+          # iwr -Uri "https://github.com/mrcgq/54321/releases/download/v0.0.1/xray.exe" -OutFile "release/xray.exe"
+          # iwr -Uri "https://github.com/mrcgq/54321/releases/download/v0.0.1/wintun.dll" -OutFile "release/wintun.dll"
+          # iwr -Uri "https://github.com/mrcgq/54321/releases/download/v0.0.1/geosite.dat" -OutFile "release/geosite.dat"
+          # iwr -Uri "https://github.com/mrcgq/54321/releases/download/v0.0.1/geoip.dat" -OutFile "release/geoip.dat"
 
-          echo "Resources downloaded."
+          echo "Listing files in release folder:"
+          ls release/
 
-      # 步骤 5: 将打包文件压缩成 ZIP
+      # 步骤 7: 将打包文件压缩成 ZIP
       - name: Create ZIP archive
         run: |
           Compress-Archive -Path release\* -DestinationPath xlink-client-windows-amd64.zip
 
-      # 步骤 6: 上传构建产物 (Artifact)
+      # 步骤 8: 上传构建产物
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:

@@ -1,7 +1,6 @@
 <template>
   <div class="h-full flex flex-col bg-gray-100 dark:bg-gray-900">
     <!-- 顶部标题栏 -->
-    <!-- 监听 open-settings 事件打开设置弹窗 -->
     <AppHeader @open-settings="showSettings = true" />
     
     <!-- 主内容区域 -->
@@ -14,8 +13,18 @@
         <!-- 节点配置编辑器 -->
         <div class="flex-1 overflow-auto p-4">
           <NodeEditor v-if="currentNode" :node="currentNode" />
-          <!-- 未选中节点时的空状态 -->
-          <EmptyState v-else />
+          
+          <!-- 空状态 (直接内联，避免 defineComponent 问题) -->
+          <div v-else class="h-full flex items-center justify-center text-gray-500 dark:text-gray-400">
+            <div class="text-center">
+              <svg class="w-16 h-16 mx-auto mb-4 text-gray-300 dark:text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" 
+                      d="M5 12h14M5 12a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v4a2 2 0 01-2 2M5 12a2 2 0 00-2 2v4a2 2 0 002 2h14a2 2 0 002-2v-4a2 2 0 00-2-2" />
+              </svg>
+              <p class="text-lg font-medium">请选择或创建一个节点</p>
+              <p class="text-sm mt-2 opacity-70">在左侧列表点击 "+ 新建" 按钮开始使用</p>
+            </div>
+          </div>
         </div>
         
         <!-- 底部日志区域 -->
@@ -64,7 +73,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, computed, defineComponent } from 'vue'
+import { ref, onMounted, computed } from 'vue'
 import { useAppStore } from '@/stores/app'
 import { useNodesStore } from '@/stores/nodes'
 import { useLogsStore } from '@/stores/logs'
@@ -76,22 +85,6 @@ import AppSidebar from '@/components/layout/AppSidebar.vue'
 import NodeEditor from '@/components/nodes/NodeEditor.vue'
 import LogViewer from '@/components/logs/LogViewer.vue'
 import GeneralSettings from '@/components/settings/GeneralSettings.vue'
-
-// 定义局部空状态组件
-const EmptyState = defineComponent({
-  template: `
-    <div class="h-full flex items-center justify-center text-gray-500 dark:text-gray-400">
-      <div class="text-center">
-        <svg class="w-16 h-16 mx-auto mb-4 text-gray-300 dark:text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" 
-                d="M5 12h14M5 12a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v4a2 2 0 01-2 2M5 12a2 2 0 00-2 2v4a2 2 0 002 2h14a2 2 0 002-2v-4a2 2 0 00-2-2" />
-        </svg>
-        <p class="text-lg font-medium">请选择或创建一个节点</p>
-        <p class="text-sm mt-2 opacity-70">在左侧列表点击 "+ 新建" 按钮开始使用</p>
-      </div>
-    </div>
-  `
-})
 
 // Store 实例
 const appStore = useAppStore()
@@ -144,8 +137,7 @@ onMounted(async () => {
       logsStore.fetchLogs()    // 获取历史日志
     ])
     
-    // 2. 初始化日志监听器 (备用方案，如果 useWailsEvent 未生效)
-    logsStore.initEventListener()
+    // 2. 注意：移除了 logsStore.initEventListener()，避免重复监听
     
   } catch (e: any) {
     appStore.showToast('error', '应用初始化失败: ' + e.message)

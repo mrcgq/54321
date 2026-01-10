@@ -1,3 +1,4 @@
+
 <template>
   <div v-if="loading" class="p-8 text-center text-gray-500">正在加载配置...</div>
   <div v-else class="bg-white dark:bg-gray-800 rounded-lg shadow-sm border border-gray-200 dark:border-gray-700 overflow-hidden">
@@ -28,40 +29,41 @@
         <div class="grid grid-cols-2 gap-4">
           <div>
             <label class="block text-sm text-gray-600 dark:text-gray-400 mb-1">本地监听</label>
-            <input v-model="localNode.listen" type="text" class="input-base" />
+            <!-- 移除 .lazy，恢复实时响应，防止数据丢失 -->
+            <input v-model="localNode.listen" type="text" class="input-base" @change="saveNode" />
           </div>
           <div>
             <label class="block text-sm text-gray-600 dark:text-gray-400 mb-1">全局指定 IP</label>
-            <input v-model="localNode.ip" type="text" class="input-base" />
+            <input v-model="localNode.ip" type="text" class="input-base" @change="saveNode" />
           </div>
         </div>
         <div class="mt-4">
           <label class="block text-sm text-gray-600 dark:text-gray-400 mb-1">服务器地址池</label>
-          <textarea v-model="localNode.server" rows="3" class="input-base font-mono text-sm resize-none"></textarea>
+          <textarea v-model="localNode.server" rows="3" class="input-base font-mono text-sm resize-none" @change="saveNode"></textarea>
         </div>
         <div class="grid grid-cols-2 gap-4 mt-4">
-          <div><label class="block text-sm text-gray-600 dark:text-gray-400 mb-1">Token</label><input v-model="localNode.token" type="password" class="input-base" /></div>
-          <div><label class="block text-sm text-gray-600 dark:text-gray-400 mb-1">Secret Key</label><input v-model="localNode.secret_key" type="password" class="input-base" /></div>
+          <div><label class="block text-sm text-gray-600 dark:text-gray-400 mb-1">Token</label><input v-model="localNode.token" type="password" class="input-base" @change="saveNode" /></div>
+          <div><label class="block text-sm text-gray-600 dark:text-gray-400 mb-1">Secret Key</label><input v-model="localNode.secret_key" type="password" class="input-base" @change="saveNode" /></div>
         </div>
         <div class="grid grid-cols-2 gap-4 mt-4">
-          <div><label class="block text-sm text-gray-600 dark:text-gray-400 mb-1">回源 IP</label><input v-model="localNode.fallback_ip" type="text" class="input-base" /></div>
-          <div><label class="block text-sm text-gray-600 dark:text-gray-400 mb-1">上游 SOCKS5</label><input v-model="localNode.socks5" type="text" class="input-base" /></div>
+          <div><label class="block text-sm text-gray-600 dark:text-gray-400 mb-1">回源 IP</label><input v-model="localNode.fallback_ip" type="text" class="input-base" @change="saveNode" /></div>
+          <div><label class="block text-sm text-gray-600 dark:text-gray-400 mb-1">上游 SOCKS5</label><input v-model="localNode.socks5" type="text" class="input-base" @change="saveNode" /></div>
         </div>
       </section>
       
       <section>
-        <h4 class="text-sm font-medium text-gray-700 dark:text-gray-300 mb-4">路由与策略</h4>
+        <h4 class="text-sm font-medium text-gray-700 dark:text-gray-300 mb-4">路由配置</h4>
         <div class="grid grid-cols-2 gap-4">
           <div>
             <label class="block text-sm text-gray-600 dark:text-gray-400 mb-1">路由模式</label>
-            <select v-model="localNode.routing_mode" class="input-base">
+            <select v-model="localNode.routing_mode" class="input-base" @change="saveNode">
               <option :value="0">全局代理</option>
               <option :value="1">智能分流</option>
             </select>
           </div>
           <div>
             <label class="block text-sm text-gray-600 dark:text-gray-400 mb-1">负载策略</label>
-            <select v-model="localNode.strategy_mode" class="input-base">
+            <select v-model="localNode.strategy_mode" class="input-base" @change="saveNode">
               <option :value="0">随机</option>
               <option :value="1">轮询</option>
               <option :value="2">哈希</option>
@@ -71,11 +73,11 @@
       </section>
 
       <section>
-        <h4 class="text-sm font-medium text-gray-700 dark:text-gray-300 mb-4">DNS 与网络</h4>
+        <h4 class="text-sm font-medium text-gray-700 dark:text-gray-300 mb-4">DNS 防泄露</h4>
         <div class="grid grid-cols-2 gap-4">
           <div>
             <label class="block text-sm text-gray-600 dark:text-gray-400 mb-1">DNS 模式</label>
-            <select v-model="localNode.dns_mode" class="input-base">
+            <select v-model="localNode.dns_mode" class="input-base" @change="saveNode">
               <option :value="0">标准</option>
               <option :value="1">Fake-IP</option>
               <option :value="2">TUN</option>
@@ -83,21 +85,10 @@
           </div>
           <div class="flex items-center">
             <label class="flex items-center gap-2 cursor-pointer">
-              <input v-model="localNode.enable_sniffing" type="checkbox" class="w-4 h-4 text-primary-600 rounded" />
+              <input v-model="localNode.enable_sniffing" type="checkbox" class="w-4 h-4 text-primary-600 rounded" @change="saveNode" />
               <span class="text-sm text-gray-600 dark:text-gray-400">启用流量嗅探</span>
             </label>
           </div>
-        </div>
-        
-        <!-- 🚀【核心 UI 新增】 -->
-        <div class="mt-4">
-          <label class="block text-sm text-gray-600 dark:text-gray-400 mb-1">IP 版本偏好</label>
-          <select v-model="ipVersion" class="input-base">
-            <option value="dual-ipv4">双栈 (IPv4 优先)</option>
-            <option value="dual-ipv6">双栈 (IPv6 优先)</option>
-            <option value="ipv4-only">仅 IPv4</option>
-            <option value="ipv6-only">仅 IPv6</option>
-          </select>
         </div>
       </section>
 
@@ -122,9 +113,12 @@ import type { NodeConfig, RoutingRule } from '@/types'
 import RuleList from '@/components/rules/RuleList.vue'
 import RuleDialog from '@/components/rules/RuleDialog.vue'
 
+// ⚠️ 只接收 ID
 const props = defineProps<{ nodeId: string }>()
 const appStore = useAppStore()
 const nodesStore = useNodesStore()
+
+// Wails 绑定声明
 declare const window: any
 
 const loading = ref(true)
@@ -134,45 +128,7 @@ const editingRule = ref<RoutingRule | null>(null)
 
 const status = computed(() => nodesStore.getNodeStatus(props.nodeId))
 
-// 🚀【核心 UI 逻辑】
-// 创建一个计算属性来双向绑定 IP 版本设置
-const ipVersion = computed({
-  get() {
-    if (localNode.value.ipv6_only) return 'ipv6-only'
-    if (localNode.value.disable_ipv6) return 'ipv4-only'
-    if (localNode.value.prefer_ipv6) return 'dual-ipv6'
-    return 'dual-ipv4' // 默认
-  },
-  set(value) {
-    switch (value) {
-      case 'ipv6-only':
-        localNode.value.enable_ipv6 = true
-        localNode.value.ipv6_only = true
-        localNode.value.disable_ipv6 = false
-        localNode.value.prefer_ipv6 = false
-        break;
-      case 'ipv4-only':
-        localNode.value.enable_ipv6 = false
-        localNode.value.ipv6_only = false
-        localNode.value.disable_ipv6 = true
-        localNode.value.prefer_ipv6 = false
-        break;
-      case 'dual-ipv6':
-        localNode.value.enable_ipv6 = true
-        localNode.value.ipv6_only = false
-        localNode.value.disable_ipv6 = false
-        localNode.value.prefer_ipv6 = true
-        break;
-      default: // dual-ipv4
-        localNode.value.enable_ipv6 = true
-        localNode.value.ipv6_only = false
-        localNode.value.disable_ipv6 = false
-        localNode.value.prefer_ipv6 = false
-        break;
-    }
-  }
-})
-
+// 监听 ID 变化，切换节点时拉取新数据
 watch(() => props.nodeId, async (newId) => {
   if (newId) await fetchNodeData()
 }, { immediate: true })
@@ -186,20 +142,23 @@ async function fetchNodeData() {
     }
   } catch (e: any) {
     console.error(e)
+    appStore.showToast('error', '加载节点失败')
   } finally {
     loading.value = false
   }
 }
 
 async function saveNode() {
+  // 保存到后端
   await nodesStore.updateNode(localNode.value)
-  appStore.showToast('success', '已保存')
+  // 不弹窗提示，避免输入时频繁打扰
 }
 
 function editName() {
   const name = prompt('新名称:', localNode.value.name)
   if (name) {
     localNode.value.name = name
+    saveNode()
   }
 }
 
@@ -208,9 +167,13 @@ async function exportNode() {
   appStore.showToast('success', '已复制')
 }
 
+// ⚠️ 关键修改：启动前强制保存
 async function startNode() { 
+  // 1. 先保存当前界面上的配置到后端
   await saveNode()
+  // 2. 然后再通知后端启动
   await nodesStore.startNode(props.nodeId) 
+  appStore.showToast('success', '已启动')
 }
 
 async function stopNode() { await nodesStore.stopNode(props.nodeId) }
@@ -223,6 +186,7 @@ function editRule(rule: RoutingRule) {
 async function deleteRule(ruleId: string) {
   if(!confirm("删除?")) return
   await nodesStore.deleteRule(props.nodeId, ruleId)
+  // 手动更新本地视图
   if (localNode.value.rules) {
     localNode.value.rules = localNode.value.rules.filter(r => r.id !== ruleId)
   }
@@ -235,7 +199,9 @@ async function saveRule(rule: RoutingRule) {
     await nodesStore.addRule(props.nodeId, rule)
   }
   closeRuleDialog()
+  // 重新拉取以保持一致
   await fetchNodeData()
+  appStore.showToast('success', '规则已保存')
 }
 
 function closeRuleDialog() {

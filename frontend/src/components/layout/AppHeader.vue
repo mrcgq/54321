@@ -26,6 +26,18 @@
     
     <!-- 间隔 -->
     <div class="flex-1"></div>
+
+    <!-- ✨ 系统代理开关 -->
+    <div class="mr-4 flex items-center gap-2 border-r border-gray-200 dark:border-gray-700 pr-4">
+      <label class="flex items-center cursor-pointer select-none" title="开启后将接管系统所有流量">
+        <div class="relative">
+          <input type="checkbox" class="sr-only" v-model="isSystemProxyEnabled" @change="toggleSystemProxy">
+          <div :class="['block w-9 h-5 rounded-full transition-colors duration-200 ease-in-out', isSystemProxyEnabled ? 'bg-primary-500' : 'bg-gray-300 dark:bg-gray-600']"></div>
+          <div :class="['absolute left-1 top-1 bg-white w-3 h-3 rounded-full transition-transform duration-200 ease-in-out', isSystemProxyEnabled ? 'translate-x-4' : '']"></div>
+        </div>
+        <span class="ml-2 text-xs font-medium text-gray-600 dark:text-gray-300">系统代理</span>
+      </label>
+    </div>
     
     <!-- 全局操作按钮 -->
     <div class="flex items-center gap-2">
@@ -80,9 +92,12 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue'
+import { ref, computed, watch } from 'vue'
 import { useAppStore } from '@/stores/app'
 import { useNodesStore } from '@/stores/nodes'
+
+// 声明 Wails 绑定，防止 TypeScript 报错
+declare const window: any
 
 const appStore = useAppStore()
 const nodesStore = useNodesStore()
@@ -99,6 +114,50 @@ const runningCount = computed(() => nodesStore.runningNodes.length)
 const isAllRunning = computed(() => {
   return nodesStore.nodes.length > 0 && 
          nodesStore.nodes.every(n => nodesStore.getNodeStatus(n.id) === 'running')
+})
+
+// 系统代理状态
+const isSystemProxyEnabled = ref(false)
+
+// 切换系统代理逻辑
+async function toggleSystemProxy() {
+  // 1. 开启代理
+  if (isSystemProxyEnabled.value) {
+    if (!nodesStore.currentNodeId) {
+      appStore.showToast('warning', '请先选择一个节点')
+      isSystemProxyEnabled.value = false
+      return
+    }
+    
+    try {
+      // 调用后端: SetSystemProxy(nodeID)
+      // 后端会根据该节点的监听端口来设置 IE 代理
+      await window.go.main.App.SetSystemProxy(nodesStore.currentNodeId)
+      appStore.showToast('success', '系统代理已开启')
+    } catch (e: any) {
+      appStore.showToast('error', '开启失败: ' + e.message)
+      isSystemProxyEnabled.value = false
+    }
+  } 
+  // 2. 关闭代理
+  else {
+    try {
+      await window.go.main.App.ClearSystemProxy()
+      appStore.showToast('success', '系统代理已清除')
+    } catch (e: any) {
+      console.error(e)
+    }
+  }
+}
+
+// 智能监听：如果所有节点都停止了，自动关闭系统代理
+// 防止用户停止代理后忘记关系统设置导致断网
+watch(hasRunningNodes, (running) => {
+  if (!running && isSystemProxyEnabled.value) {
+    isSystemProxyEnabled.value = false
+    window.go.main.App.ClearSystemProxy().catch(console.error)
+    appStore.showToast('info', '节点已停止，系统代理自动关闭')
+  }
 })
 
 // 切换主题

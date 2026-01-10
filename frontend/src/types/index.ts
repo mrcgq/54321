@@ -4,7 +4,7 @@
 
 export interface RoutingRule {
   id: string
-  type: string // "", "domain:", "regexp:", "geosite:", "geoip:"
+  type: string
   match: string
   target: string
 }
@@ -23,6 +23,13 @@ export interface NodeConfig {
   strategy_mode: number
   dns_mode: number
   enable_sniffing: boolean
+  
+  // 🚀【核心修复】同步后端的模型变更
+  enable_ipv6: boolean
+  prefer_ipv6: boolean
+  ipv6_only: boolean
+  disable_ipv6: boolean
+
   rules: RoutingRule[]
   status?: string
 }

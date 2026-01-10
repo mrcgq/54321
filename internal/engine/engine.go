@@ -29,10 +29,7 @@ const (
 	StartTimeout = 10 * time.Second
 
 	// 进程停止超时
-	StopTimeout = 2 * time.Second // 缩短超时，加速停止反馈
-
-	// 健康检查间隔
-	HealthCheckInterval = 5 * time.Second
+	StopTimeout = 2 * time.Second
 )
 
 // =============================================================================
@@ -175,8 +172,9 @@ func (m *Manager) StartNode(node *models.NodeConfig, configPath string) error {
 	instance.mu.Unlock()
 	instance.StatusCallback(models.StatusRunning, nil)
 
-	// 启动健康检查
-	go m.healthCheckLoop(instance)
+	// ⚠️【修复】删除了 healthCheckLoop 调用
+	// Go 的 waitProcess (cmd.Wait) 机制已经足够稳定，
+	// 额外的轮询检查在 Windows 上会导致误判并杀死正常进程。
 
 	return nil
 }
@@ -367,7 +365,7 @@ func (m *Manager) StopAll() {
 	}
 }
 
-// terminateProcess 终止进程 (核心修复)
+// terminateProcess 终止进程
 func (m *Manager) terminateProcess(proc *ProcessInfo) {
 	if proc == nil || proc.Cmd == nil || proc.Cmd.Process == nil {
 		return
@@ -382,8 +380,7 @@ func (m *Manager) terminateProcess(proc *ProcessInfo) {
 	if proc.StdoutPipe != nil { proc.StdoutPipe.Close() }
 	if proc.StderrPipe != nil { proc.StderrPipe.Close() }
 
-	// 3. ⚠️【关键修复】调用平台特定的强制终止方法 (taskkill / kill)
-	// 之前这里只调用了 proc.Cmd.Process.Kill()，在 Windows 上经常杀不掉
+	// 3. 调用平台特定的强制终止方法
 	if err := m.killProcessTree(proc.Pid); err != nil {
 		// 如果 killProcessTree 失败，兜底调用 Go 原生 Kill
 		proc.Cmd.Process.Kill()
@@ -455,7 +452,6 @@ func (m *Manager) parseAndForwardLog(inst *EngineInstance, source, line string) 
 
 // parseTunnelLog 解析隧道日志
 func (m *Manager) parseTunnelLog(line string) string {
-	// 简单格式化，去除冗余
 	if idx := strings.Index(line, "Tunnel ->"); idx != -1 {
 		return line[idx:]
 	}
@@ -484,10 +480,11 @@ func (m *Manager) parseStatsLog(line string) string {
 }
 
 // =============================================================================
-// 进程监控
+// 进程监控 (被动等待)
 // =============================================================================
 
 // waitProcess 等待进程退出
+// 这是最标准的进程守护方式，当进程因任何原因退出时，Wait 会返回
 func (m *Manager) waitProcess(inst *EngineInstance, source string, cmd *exec.Cmd) {
 	err := cmd.Wait()
 
@@ -515,37 +512,7 @@ func (m *Manager) waitProcess(inst *EngineInstance, source string, cmd *exec.Cmd
 	}
 }
 
-// healthCheckLoop 健康检查循环
-func (m *Manager) healthCheckLoop(inst *EngineInstance) {
-	ticker := time.NewTicker(HealthCheckInterval)
-	defer ticker.Stop()
-
-	for {
-		<-ticker.C
-
-		inst.mu.RLock()
-		status := inst.Status
-		xlinkProc := inst.XlinkProcess
-		inst.mu.RUnlock()
-
-		if status != models.StatusRunning {
-			return
-		}
-
-		if xlinkProc != nil && xlinkProc.Cmd != nil && xlinkProc.Cmd.Process != nil {
-			// 发送 Signal 0 检查进程是否存在
-			if err := xlinkProc.Cmd.Process.Signal(os.Signal(nil)); err != nil {
-				// 进程不存在了
-				if inst.LogCallback != nil {
-					inst.LogCallback("error", "系统", "检测到核心进程已消失")
-				}
-				// 触发清理
-				m.stopInstanceLocked(inst.NodeID)
-				return
-			}
-		}
-	}
-}
+// ⚠️【修复】已移除 healthCheckLoop 函数
 
 // =============================================================================
 // Ping测试
@@ -560,7 +527,6 @@ func (m *Manager) PingTest(node *models.NodeConfig, callback func(result models.
 	servers := strings.ReplaceAll(node.Server, "\r\n", ";")
 	servers = strings.ReplaceAll(servers, "\n", ";")
 
-	// ⚠️【修复】优先使用 Token 字段，与 generator 逻辑保持一致
 	mainToken := node.Token
 	if mainToken == "" {
 		mainToken = node.SecretKey
@@ -575,7 +541,6 @@ func (m *Manager) PingTest(node *models.NodeConfig, callback func(result models.
 		args = append(args, "--ip="+node.IP)
 	}
 
-	// 这里的 Context Cancel 足够了，因为 Ping 进程很快自己会退出
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
@@ -592,7 +557,6 @@ func (m *Manager) PingTest(node *models.NodeConfig, callback func(result models.
 		scanner := bufio.NewScanner(stdout)
 		for scanner.Scan() {
 			line := scanner.Text()
-			// 简单解析 Delay: 100ms
 			if strings.Contains(line, "Delay:") {
 				parts := strings.Split(line, "|")
 				if len(parts) >= 2 {
@@ -607,9 +571,7 @@ func (m *Manager) PingTest(node *models.NodeConfig, callback func(result models.
 		}
 	}()
 
-	// ⚠️【修复】确保 Ping 进程也被彻底清理
 	err = cmd.Wait()
-	// 使用 killProcessTree 兜底清理（以防万一）
 	if cmd.Process != nil {
 		m.killProcessTree(cmd.Process.Pid)
 	}

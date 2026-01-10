@@ -16,32 +16,27 @@ import (
 )
 
 // =============================================================================
-// 常量定义
+// 常量定义 (新增 IPv6 DNS)
 // =============================================================================
 
 const (
-	// Fake-IP 地址池
-	FakeIPPoolStart = "198.18.0.0"
-	FakeIPPoolCIDR  = "198.18.0.0/15" // 198.18.0.0 - 198.19.255.255
-	FakeIPPoolSize  = 65535
+	FakeIPPoolStart  = "198.18.0.0"
+	FakeIPPoolCIDR   = "198.18.0.0/15"
+	FakeIPPoolSize   = 65535
 
-	// DNS服务器
 	DNSCloudflare    = "1.1.1.1"
 	DNSCloudflareDoH = "https://1.1.1.1/dns-query"
 	DNSGoogle        = "8.8.8.8"
+	DNSGoogleIPv6    = "2001:4860:4860::8888" // <--- 新增
 	DNSGoogleDoH     = "https://dns.google/dns-query"
 	DNSAliDNS        = "223.5.5.5"
 	DNSTencent       = "119.29.29.29"
 
-	// TUN配置
 	DefaultTUNName = "XlinkTUN"
 	DefaultTUNMTU  = 9000
 )
 
-// =============================================================================
-// DNS管理器
-// =============================================================================
-
+// ... (Manager 结构体和 NewManager, SetLogCallback, log 方法保持不变) ...
 // Manager DNS防泄露管理器
 type Manager struct {
 	mu sync.RWMutex
@@ -85,12 +80,8 @@ func (m *Manager) log(level, message string) {
 		m.logCallback(level, message)
 	}
 }
-
-// =============================================================================
+// DNSConfig 和 DefaultDNSConfig 保持不变
 // DNS模式配置
-// =============================================================================
-
-// DNSConfig DNS配置
 type DNSConfig struct {
 	Mode            int      `json:"mode"`
 	CustomUpstream  []string `json:"custom_upstream,omitempty"`
@@ -133,23 +124,20 @@ func DefaultDNSConfig() *DNSConfig {
 		},
 	}
 }
-
 // =============================================================================
-// Xray DNS配置生成
+// Xray DNS配置生成 (IPv6 增强)
 // =============================================================================
 
-// XrayDNSConfig Xray的DNS配置结构
 type XrayDNSConfig struct {
 	Hosts           map[string]interface{} `json:"hosts,omitempty"`
 	Servers         []interface{}          `json:"servers"`
 	ClientIP        string                 `json:"clientIp,omitempty"`
-	QueryStrategy   string                 `json:"queryStrategy,omitempty"`
+	QueryStrategy   string                 `json:"queryStrategy,omitempty"` // Xray v5+ 使用 []string
 	DisableCache    bool                   `json:"disableCache,omitempty"`
 	DisableFallback bool                   `json:"disableFallback,omitempty"`
 	Tag             string                 `json:"tag,omitempty"`
 }
 
-// XrayDNSServer DNS服务器配置
 type XrayDNSServer struct {
 	Address      string   `json:"address"`
 	Port         int      `json:"port,omitempty"`
@@ -159,13 +147,15 @@ type XrayDNSServer struct {
 	ClientIP     string   `json:"clientIp,omitempty"`
 }
 
-// GenerateXrayDNSConfig 生成Xray DNS配置
+// GenerateXrayDNSConfig 生成Xray DNS配置 (IPv6 增强)
 func (m *Manager) GenerateXrayDNSConfig(cfg *DNSConfig, hasGeosite, hasGeoip bool) *XrayDNSConfig {
 	dnsConfig := &XrayDNSConfig{
 		Hosts: map[string]interface{}{
 			"localhost": "127.0.0.1",
+			"localhost.localdomain": "127.0.0.1",
 		},
-		QueryStrategy:   "UseIP",
+		// ⚠️【核心修复】强制同时查询 IPv4 和 IPv6
+		QueryStrategy:   "UseIPv4,UseIPv6", 
 		DisableCache:    false,
 		DisableFallback: false,
 		Tag:             "dns-internal",
@@ -173,21 +163,15 @@ func (m *Manager) GenerateXrayDNSConfig(cfg *DNSConfig, hasGeosite, hasGeoip boo
 
 	switch cfg.Mode {
 	case models.DNSModeFakeIP:
-		// Fake-IP 模式：使用FakeDNS + 远程DNS
 		dnsConfig.Servers = m.buildFakeIPDNSServers(hasGeosite)
 		dnsConfig.DisableFallback = true
-
 	case models.DNSModeTUN:
-		// TUN模式：完全远程解析
 		dnsConfig.Servers = m.buildRemoteDNSServers(hasGeosite)
 		dnsConfig.DisableFallback = true
-
 	default:
-		// 标准模式：分流DNS
 		dnsConfig.Servers = m.buildSplitDNSServers(hasGeosite, hasGeoip)
 	}
 
-	// 添加广告拦截hosts
 	if cfg.BlockAds && hasGeosite {
 		dnsConfig.Hosts["geosite:category-ads-all"] = "127.0.0.1"
 	}
@@ -195,102 +179,56 @@ func (m *Manager) GenerateXrayDNSConfig(cfg *DNSConfig, hasGeosite, hasGeoip boo
 	return dnsConfig
 }
 
-// buildFakeIPDNSServers 构建Fake-IP模式DNS服务器列表
+// buildFakeIPDNSServers (IPv6 增强)
 func (m *Manager) buildFakeIPDNSServers(hasGeosite bool) []interface{} {
-	servers := []interface{}{}
-
-	// FakeDNS优先
-	servers = append(servers, "fakedns")
-
-	// 远程DNS作为后备（通过代理）
-	remoteServer := XrayDNSServer{
-		Address:      DNSCloudflareDoH,
-		SkipFallback: false,
+	servers := []interface{}{
+		"fakedns", // FakeDNS 优先
+		m.buildRemoteDNSServers(hasGeosite)[0], // 复用远程 DNS 配置
+		// ⚠️【核心修复】添加一个 IPv6 DNS 作为备用
+		XrayDNSServer{ Address: DNSGoogleIPv6 },
 	}
-
-	if hasGeosite {
-		// 只对非中国域名使用远程DNS
-		remoteServer.Domains = []string{
-			"geosite:geolocation-!cn",
-		}
-	}
-
-	servers = append(servers, remoteServer)
-
 	return servers
 }
 
-// buildRemoteDNSServers 构建远程DNS服务器列表
+// buildRemoteDNSServers (IPv6 增强)
 func (m *Manager) buildRemoteDNSServers(hasGeosite bool) []interface{} {
-	servers := []interface{}{}
-
-	// 主DNS：Cloudflare DoH
-	primaryServer := XrayDNSServer{
-		Address:      DNSCloudflareDoH,
-		SkipFallback: false,
-	}
-
+	// 主 DNS: Cloudflare (DoH)
+	primaryServer := XrayDNSServer{ Address: DNSCloudflareDoH }
 	if hasGeosite {
-		primaryServer.Domains = []string{
-			"geosite:geolocation-!cn",
-		}
+		primaryServer.Domains = []string{"geosite:geolocation-!cn"}
 	}
-
-	servers = append(servers, primaryServer)
-
-	// 备用DNS：Google DoH
-	servers = append(servers, XrayDNSServer{
-		Address: DNSGoogleDoH,
-	})
-
-	return servers
+	
+	// 备用 DNS: Google (IPv6)
+	backupServer := XrayDNSServer{ Address: DNSGoogleIPv6 }
+	
+	return []interface{}{primaryServer, backupServer}
 }
 
-// buildSplitDNSServers 构建分流DNS服务器列表
+// buildSplitDNSServers (IPv6 增强)
 func (m *Manager) buildSplitDNSServers(hasGeosite, hasGeoip bool) []interface{} {
 	servers := []interface{}{}
 
-	// 国内域名使用国内DNS
 	if hasGeosite && hasGeoip {
+		// 国内 DNS (IPv4)
 		servers = append(servers, XrayDNSServer{
-			Address: DNSAliDNS,
-			Port:    53,
-			Domains: []string{
-				"geosite:cn",
-				"geosite:geolocation-cn",
-				"geosite:tld-cn",
-			},
-			ExpectIPs: []string{
-				"geoip:cn",
-			},
-			SkipFallback: true,
-		})
-
-		// 备用国内DNS
-		servers = append(servers, XrayDNSServer{
-			Address: DNSTencent,
-			Port:    53,
-			Domains: []string{
-				"geosite:cn",
-			},
+			Address:      DNSAliDNS,
+			Port:         53,
+			Domains:      []string{"geosite:cn", "geosite:geolocation-cn", "geosite:tld-cn"},
+			ExpectIPs:    []string{"geoip:cn"},
 			SkipFallback: true,
 		})
 	}
-
-	// 国外域名使用国外DNS（通过代理）
-	servers = append(servers, XrayDNSServer{
-		Address: DNSCloudflareDoH,
-	})
-
-	// 最终后备
-	servers = append(servers, DNSGoogle)
+	
+	// 国外 DNS (DoH)
+	servers = append(servers, XrayDNSServer{ Address: DNSCloudflareDoH })
+	
+	// 备用 DNS (IPv6)
+	servers = append(servers, XrayDNSServer{ Address: DNSGoogleIPv6 })
 
 	return servers
 }
 
-// =============================================================================
-// FakeDNS配置生成
-// =============================================================================
+// ... (FakeDNS, Sniffing, TUN 配置生成保持不变) ...
 
 // XrayFakeDNSConfig FakeDNS配置
 type XrayFakeDNSConfig struct {
@@ -305,10 +243,6 @@ func (m *Manager) GenerateFakeDNSConfig() *XrayFakeDNSConfig {
 		PoolSize: FakeIPPoolSize,
 	}
 }
-
-// =============================================================================
-// 流量嗅探配置
-// =============================================================================
 
 // XraySniffingConfig 流量嗅探配置
 type XraySniffingConfig struct {
@@ -341,10 +275,6 @@ func (m *Manager) GenerateSniffingConfig(cfg *DNSConfig) *XraySniffingConfig {
 		},
 	}
 }
-
-// =============================================================================
-// TUN模式配置
-// =============================================================================
 
 // TUNConfig TUN网卡配置
 type TUNConfig struct {
@@ -399,12 +329,10 @@ func (m *Manager) GenerateTUNConfig(cfg *DNSConfig) *TUNConfig {
 
 	return tunCfg
 }
-
 // =============================================================================
-// 完整Xray配置生成
+// 完整Xray配置生成 (IPv6 增强)
 // =============================================================================
 
-// XrayFullConfig 完整的Xray配置
 type XrayFullConfig struct {
 	Log       map[string]interface{}   `json:"log"`
 	DNS       *XrayDNSConfig           `json:"dns,omitempty"`
@@ -414,13 +342,7 @@ type XrayFullConfig struct {
 	Routing   map[string]interface{}   `json:"routing"`
 }
 
-// GenerateFullXrayConfig 生成完整的Xray配置
-func (m *Manager) GenerateFullXrayConfig(
-	node *models.NodeConfig,
-	xlinkPort int,
-	hasGeosite, hasGeoip bool,
-) (*XrayFullConfig, error) {
-
+func (m *Manager) GenerateFullXrayConfig(node *models.NodeConfig, xlinkPort int, hasGeosite, hasGeoip bool) (*XrayFullConfig, error) {
 	dnsCfg := &DNSConfig{
 		Mode:           node.DNSMode,
 		EnableFakeIP:   node.DNSMode == models.DNSModeFakeIP,
@@ -429,94 +351,47 @@ func (m *Manager) GenerateFullXrayConfig(
 		HijackDNS:      true,
 		BlockAds:       true,
 	}
-
-	// 解析监听地址
+	
 	listenHost, listenPort := m.parseListenAddr(node.Listen)
-
+	
 	config := &XrayFullConfig{
-		Log: map[string]interface{}{
-			"loglevel": "warning",
-		},
+		Log: map[string]interface{}{"loglevel": "warning"},
 	}
 
-	// DNS配置
 	config.DNS = m.GenerateXrayDNSConfig(dnsCfg, hasGeosite, hasGeoip)
 
-	// FakeDNS配置
 	if dnsCfg.EnableFakeIP {
-		config.FakeDNS = []interface{}{
-			m.GenerateFakeDNSConfig(),
-		}
+		config.FakeDNS = []interface{}{m.GenerateFakeDNSConfig()}
 	}
-
-	// 入站配置
+	
 	inbound := map[string]interface{}{
 		"tag":      "socks-in",
 		"listen":   listenHost,
 		"port":     listenPort,
 		"protocol": "socks",
-		"settings": map[string]interface{}{
-			"auth": "noauth",
-			"udp":  true,
-			"ip":   "127.0.0.1",
-		},
+		"settings": map[string]interface{}{"auth": "noauth", "udp": true, "ip": "127.0.0.1"},
 	}
-
-	// 添加嗅探配置
-	sniffing := m.GenerateSniffingConfig(dnsCfg)
-	if sniffing != nil {
+	
+	if sniffing := m.GenerateSniffingConfig(dnsCfg); sniffing != nil {
 		inbound["sniffing"] = sniffing
 	}
 
 	config.Inbounds = []map[string]interface{}{inbound}
 
-	// 出站配置
 	config.Outbounds = []map[string]interface{}{
-		{
-			"tag":      "proxy_out",
-			"protocol": "socks",
-			"settings": map[string]interface{}{
-				"servers": []map[string]interface{}{
-					{
-						"address": "127.0.0.1",
-						"port":    xlinkPort,
-					},
-				},
-			},
-		},
-		{
-			"tag":      "direct",
-			"protocol": "freedom",
-			"settings": map[string]interface{}{
-				"domainStrategy": "UseIP", // 使用解析后的IP
-			},
-		},
-		{
-			"tag":      "block",
-			"protocol": "blackhole",
-			"settings": map[string]interface{}{},
-		},
-		{
-			"tag":      "dns-out",
-			"protocol": "dns",
-			"settings": map[string]interface{}{},
-		},
+		{"tag": "proxy_out", "protocol": "socks", "settings": map[string]interface{}{"servers": []map[string]interface{}{{"address": "127.0.0.1", "port": xlinkPort}}}},
+		{"tag": "direct", "protocol": "freedom", "settings": map[string]interface{}{"domainStrategy": "UseIP"}},
+		{"tag": "block", "protocol": "blackhole", "settings": map[string]interface{}{}},
+		{"tag": "dns-out", "protocol": "dns", "settings": map[string]interface{}{}},
 	}
-
-	// 路由配置
+	
 	config.Routing = m.generateRoutingConfig(node, dnsCfg, hasGeosite, hasGeoip)
-
+	
 	return config, nil
 }
 
-// generateRoutingConfig 生成路由配置
-func (m *Manager) generateRoutingConfig(
-	node *models.NodeConfig,
-	dnsCfg *DNSConfig,
-	hasGeosite, hasGeoip bool,
-) map[string]interface{} {
-
-	// 域名策略
+// generateRoutingConfig (IPv6 增强)
+func (m *Manager) generateRoutingConfig(node *models.NodeConfig, dnsCfg *DNSConfig, hasGeosite, hasGeoip bool) map[string]interface{} {
 	domainStrategy := "AsIs"
 	if dnsCfg.EnableFakeIP {
 		domainStrategy = "IPIfNonMatch"
@@ -526,22 +401,18 @@ func (m *Manager) generateRoutingConfig(
 		"domainStrategy": domainStrategy,
 		"domainMatcher":  "hybrid",
 		"rules":          []map[string]interface{}{},
+		"strategy":       "rules", // 明确路由策略
 	}
-
+	
 	rules := []map[string]interface{}{}
 
-	// DNS请求路由到dns-out
 	rules = append(rules, map[string]interface{}{
-		"type":        "field",
-		"inboundTag":  []string{"socks-in"},
-		"port":        53,
-		"outboundTag": "dns-out",
+		"type": "field", "inboundTag": []string{"socks-in"}, "port": 53, "outboundTag": "dns-out",
 	})
-
-	// 用户自定义规则
+	
+	// 用户规则
 	for _, r := range node.Rules {
-		rule := m.convertUserRule(r)
-		if rule != nil {
+		if rule := m.convertUserRule(r); rule != nil {
 			rules = append(rules, rule)
 		}
 	}
@@ -549,59 +420,42 @@ func (m *Manager) generateRoutingConfig(
 	// 广告拦截
 	if dnsCfg.BlockAds && hasGeosite {
 		rules = append(rules, map[string]interface{}{
-			"type":        "field",
-			"outboundTag": "block",
-			"domain":      []string{"geosite:category-ads-all"},
+			"type": "field", "outboundTag": "block", "domain": []string{"geosite:category-ads-all"},
 		})
 	}
-
-	// 拦截BT流量
+	
+	// BT 拦截
 	rules = append(rules, map[string]interface{}{
-		"type":        "field",
-		"outboundTag": "block",
-		"protocol":    []string{"bittorrent"},
+		"type": "field", "outboundTag": "block", "protocol": []string{"bittorrent"},
 	})
-
-	// 私有IP直连
+	
+	// ⚠️【核心修复】添加 IPv6 直连规则
 	if hasGeoip {
 		rules = append(rules, map[string]interface{}{
-			"type":        "field",
-			"outboundTag": "direct",
-			"ip":          []string{"geoip:private"},
+			"type": "field", "outboundTag": "direct", "ip": []string{"geoip:private", "geoip:private6"},
 		})
-	}
-
-	// 中国IP直连
-	if hasGeoip {
 		rules = append(rules, map[string]interface{}{
-			"type":        "field",
-			"outboundTag": "direct",
-			"ip":          []string{"geoip:cn"},
+			"type": "field", "outboundTag": "direct", "ip": []string{"geoip:cn", "geoip:cn6"},
 		})
 	}
-
-	// 中国域名直连
+	
 	if hasGeosite {
 		rules = append(rules, map[string]interface{}{
-			"type":        "field",
-			"outboundTag": "direct",
-			"domain":      []string{"geosite:cn", "geosite:geolocation-cn"},
+			"type": "field", "outboundTag": "direct", "domain": []string{"geosite:cn", "geosite:geolocation-cn"},
 		})
 	}
-
-	// 默认走代理
+	
+	// 默认代理
 	rules = append(rules, map[string]interface{}{
-		"type":        "field",
-		"outboundTag": "proxy_out",
-		"port":        "0-65535",
+		"type": "field", "outboundTag": "proxy_out", "network": "tcp,udp",
 	})
-
+	
 	routing["rules"] = rules
-
 	return routing
 }
 
-// convertUserRule 转换用户规则
+// ... (convertUserRule, Fake-IP管理, 系统DNS, 工具函数等保持不变) ...
+
 func (m *Manager) convertUserRule(r models.RoutingRule) map[string]interface{} {
 	rule := map[string]interface{}{
 		"type": "field",
@@ -635,11 +489,6 @@ func (m *Manager) convertUserRule(r models.RoutingRule) map[string]interface{} {
 	return rule
 }
 
-// =============================================================================
-// Fake-IP 管理
-// =============================================================================
-
-// AllocateFakeIP 为域名分配Fake-IP
 func (m *Manager) AllocateFakeIP(domain string) string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -667,7 +516,6 @@ func (m *Manager) AllocateFakeIP(domain string) string {
 	return ipStr
 }
 
-// LookupFakeIP 通过Fake-IP查询域名
 func (m *Manager) LookupFakeIP(ip string) (string, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -676,7 +524,6 @@ func (m *Manager) LookupFakeIP(ip string) (string, bool) {
 	return domain, exists
 }
 
-// IsFakeIP 检查是否是Fake-IP
 func (m *Manager) IsFakeIP(ip string) bool {
 	parsed := net.ParseIP(ip)
 	if parsed == nil {
@@ -687,7 +534,6 @@ func (m *Manager) IsFakeIP(ip string) bool {
 	return fakeNet.Contains(parsed)
 }
 
-// ClearFakeIPCache 清空Fake-IP缓存
 func (m *Manager) ClearFakeIPCache() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -697,11 +543,6 @@ func (m *Manager) ClearFakeIPCache() {
 	m.nextFakeIP = ipToUint32(net.ParseIP(FakeIPPoolStart))
 }
 
-// =============================================================================
-// 系统DNS操作（Windows）
-// =============================================================================
-
-// GetSystemDNS 获取系统DNS设置
 func (m *Manager) GetSystemDNS() ([]string, error) {
 	if runtime.GOOS != "windows" {
 		return nil, fmt.Errorf("仅支持Windows")
@@ -728,7 +569,6 @@ func (m *Manager) GetSystemDNS() ([]string, error) {
 	return dns, nil
 }
 
-// SetSystemDNS 设置系统DNS（需要管理员权限）
 func (m *Manager) SetSystemDNS(interfaceName string, dns []string) error {
 	if runtime.GOOS != "windows" {
 		return fmt.Errorf("仅支持Windows")
@@ -762,7 +602,6 @@ func (m *Manager) SetSystemDNS(interfaceName string, dns []string) error {
 	return nil
 }
 
-// ResetSystemDNS 重置系统DNS为自动获取
 func (m *Manager) ResetSystemDNS(interfaceName string) error {
 	if runtime.GOOS != "windows" {
 		return fmt.Errorf("仅支持Windows")
@@ -776,11 +615,6 @@ func (m *Manager) ResetSystemDNS(interfaceName string) error {
 	return cmd.Run()
 }
 
-// =============================================================================
-// 配置文件写入
-// =============================================================================
-
-// WriteXrayConfig 写入Xray配置文件
 func (m *Manager) WriteXrayConfig(config *XrayFullConfig, path string) error {
 	data, err := json.MarshalIndent(config, "", "  ")
 	if err != nil {
@@ -790,11 +624,6 @@ func (m *Manager) WriteXrayConfig(config *XrayFullConfig, path string) error {
 	return os.WriteFile(path, data, 0644)
 }
 
-// =============================================================================
-// 工具函数
-// =============================================================================
-
-// parseListenAddr 解析监听地址
 func (m *Manager) parseListenAddr(addr string) (host string, port int) {
 	host = "127.0.0.1"
 	port = 10808
@@ -814,7 +643,6 @@ func (m *Manager) parseListenAddr(addr string) (host string, port int) {
 	return
 }
 
-// ipToUint32 IP转uint32
 func ipToUint32(ip net.IP) uint32 {
 	ip = ip.To4()
 	if ip == nil {
@@ -823,12 +651,10 @@ func ipToUint32(ip net.IP) uint32 {
 	return uint32(ip[0])<<24 | uint32(ip[1])<<16 | uint32(ip[2])<<8 | uint32(ip[3])
 }
 
-// uint32ToIP uint32转IP
 func uint32ToIP(n uint32) net.IP {
 	return net.IPv4(byte(n>>24), byte(n>>16), byte(n>>8), byte(n))
 }
 
-// FileExists 检查文件是否存在
 func (m *Manager) FileExists(filename string) bool {
 	path := filepath.Join(m.exeDir, filename)
 	_, err := os.Stat(path)

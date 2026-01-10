@@ -1,17 +1,44 @@
+
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import type { NodeConfig, EngineStatus } from '@/types'
 
 // Wails 绑定声明
-declare const window: any
+declare const window: {
+  go: {
+    main: {
+      App: {
+        GetNodes(): Promise<NodeConfig[]>
+        GetNode(id: string): Promise<NodeConfig | null>
+        AddNode(name: string): Promise<NodeConfig>
+        UpdateNode(node: NodeConfig): Promise<void>
+        DeleteNode(id: string): Promise<void>
+        DuplicateNode(id: string): Promise<NodeConfig>
+        StartNode(id: string): Promise<void>
+        StopNode(id: string): Promise<void>
+        StartAllNodes(): Promise<void>
+        StopAllNodes(): Promise<void>
+        PingTest(id: string): Promise<void>
+        GetAllNodeStatuses(): Promise<Record<string, EngineStatus>>
+        AddRule(nodeId: string, rule: any): Promise<void>
+        UpdateRule(nodeId: string, rule: any): Promise<void>
+        DeleteRule(nodeId: string, ruleId: string): Promise<void>
+        ExportToClipboard(id: string): Promise<void>
+        ImportFromClipboard(): Promise<number>
+      }
+    }
+  }
+}
 
 export const useNodesStore = defineStore('nodes', () => {
+  // 状态
   const nodes = ref<NodeConfig[]>([])
   const currentNodeId = ref<string | null>(null)
   const statuses = ref<Record<string, EngineStatus>>({})
   const isLoading = ref(false)
   const error = ref<string | null>(null)
 
+  // 计算属性
   const currentNode = computed(() => {
     if (!currentNodeId.value) return null
     return nodes.value.find(n => n.id === currentNodeId.value) || null
@@ -26,16 +53,19 @@ export const useNodesStore = defineStore('nodes', () => {
 
   const hasRunningNodes = computed(() => runningNodes.value.length > 0)
 
+  // 方法：获取列表
   async function fetchNodes() {
     isLoading.value = true
+    error.value = null
     try {
       nodes.value = await window.go.main.App.GetNodes()
       await fetchStatuses()
+      // 默认选中第一个
       if (!currentNodeId.value && nodes.value.length > 0) {
         currentNodeId.value = nodes.value[0].id
       }
     } catch (e: any) {
-      console.error(e)
+      error.value = e.message || '加载节点失败'
     } finally {
       isLoading.value = false
     }
@@ -51,32 +81,25 @@ export const useNodesStore = defineStore('nodes', () => {
     currentNodeId.value = id
   }
 
-  async function addNode(name: string) {
+  async function addNode(name: string = '新节点') {
     const node = await window.go.main.App.AddNode(name)
-    await fetchNodes()
+    await fetchNodes() // 增删需要刷新列表
     currentNodeId.value = node.id
     return node
   }
 
-  // ⚠️【核心修复】
+  // ⚠️【核心修复】绝对不更新本地 state，切断死循环
   async function updateNode(node: NodeConfig) {
-    // 1. 告诉后端保存
     await window.go.main.App.UpdateNode(node)
-    
-    // 2. 手动、安全地更新前端 Pinia Store 的状态
-    // 这样可以确保侧边栏等其他组件能看到最新的名称等信息
-    const index = nodes.value.findIndex(n => n.id === node.id)
-    if (index !== -1) {
-        // 使用 Object.assign 只更新属性，不替换整个对象引用，
-        // 这样做最安全，不会触发不必要的 Vue 响应式重绘。
-        Object.assign(nodes.value[index], node)
-    }
+    // 结束。不要 fetchNodes，不要修改 nodes.value
   }
 
   async function deleteNode(id: string) {
     await window.go.main.App.DeleteNode(id)
     await fetchNodes()
-    if (currentNodeId.value === id) currentNodeId.value = null
+    if (currentNodeId.value === id) {
+      currentNodeId.value = nodes.value[0]?.id || null
+    }
   }
 
   async function duplicateNode(id: string) {
@@ -128,13 +151,17 @@ export const useNodesStore = defineStore('nodes', () => {
 
   async function importNodes() {
     const count = await window.go.main.App.ImportFromClipboard()
-    if (count > 0) await fetchNodes()
+    if (count > 0) {
+      await fetchNodes()
+    }
     return count
   }
   
+  // 规则操作
   async function addRule(nodeId: string, rule: any) {
     await window.go.main.App.AddRule(nodeId, rule);
-    await fetchNodes(); 
+    // 规则变动不频繁，允许刷新
+    await fetchNodes();
   }
   
   async function updateRule(nodeId: string, rule: any) {

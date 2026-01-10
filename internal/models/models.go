@@ -1,5 +1,3 @@
-
-
 // Package models 定义所有数据结构
 package models
 
@@ -469,7 +467,3 @@ func ApplyGlobalIPv6Settings(node *NodeConfig, config *AppConfig) {
 		node.DisableIPv6 = config.GlobalDisableIPv6
 	}
 }
-
-
-
-

@@ -56,9 +56,11 @@ func main() {
 
 		BackgroundColour: &options.RGBA{R: 255, G: 255, B: 255, A: 1},
 
+		// 绑定生命周期
 		OnStartup:  app.startup,
 		OnShutdown: app.shutdown,
 
+		// 绑定后端方法供前端调用
 		Bind: []interface{}{
 			app,
 		},
@@ -73,11 +75,11 @@ func main() {
 			Theme:                             windows.SystemDefault,
 		},
 
-		// 启用单实例
+		// 启用单实例锁 (防止重复启动)
 		SingleInstanceLock: &options.SingleInstanceLock{
 			UniqueId: "xlink-client-v22-unique-lock",
 			OnSecondInstanceLaunch: func(data options.SecondInstanceData) {
-				// 当第二个实例启动时，显示主窗口
+				// 当第二个实例启动时，唤醒主窗口
 				app.ShowWindow()
 			},
 		},

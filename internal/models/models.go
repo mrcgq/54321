@@ -110,6 +110,9 @@ type AppConfig struct {
 	// DNS 全局设置
 	GlobalDNSMode    int    `json:"global_dns_mode"`    // 全局DNS模式
 	TUNInterfaceName string `json:"tun_interface_name"` // TUN网卡名称
+
+	// 🚀【核心新增】记录上次运行的节点 ID，实现自动恢复
+	LastRunningNodeID string `json:"last_running_node_id"`
 }
 
 // =============================================================================
@@ -192,7 +195,7 @@ type Event struct {
 
 // AppState 全局应用状态（线程安全）
 type AppState struct {
-	Mu             sync.RWMutex // 【重要修改】改为导出字段 Mu (首字母大写)
+	Mu             sync.RWMutex
 	Config         *AppConfig
 	EngineStatuses map[string]*EngineStatus // key: NodeID
 	CurrentNodeID  string
@@ -217,8 +220,8 @@ func NewAppState() *AppState {
 
 // GetNode 获取节点（线程安全）
 func (s *AppState) GetNode(id string) *NodeConfig {
-	s.Mu.RLock() // 修改为 Mu
-	defer s.Mu.RUnlock() // 修改为 Mu
+	s.Mu.RLock()
+	defer s.Mu.RUnlock()
 	for i := range s.Config.Nodes {
 		if s.Config.Nodes[i].ID == id {
 			return &s.Config.Nodes[i]
@@ -229,8 +232,8 @@ func (s *AppState) GetNode(id string) *NodeConfig {
 
 // GetNodeByIndex 通过索引获取节点
 func (s *AppState) GetNodeByIndex(index int) *NodeConfig {
-	s.Mu.RLock() // 修改为 Mu
-	defer s.Mu.RUnlock() // 修改为 Mu
+	s.Mu.RLock()
+	defer s.Mu.RUnlock()
 	if index >= 0 && index < len(s.Config.Nodes) {
 		return &s.Config.Nodes[index]
 	}
@@ -239,8 +242,8 @@ func (s *AppState) GetNodeByIndex(index int) *NodeConfig {
 
 // UpdateNodeStatus 更新节点状态
 func (s *AppState) UpdateNodeStatus(nodeID, status string, errMsg string) {
-	s.Mu.Lock() // 修改为 Mu
-	defer s.Mu.Unlock() // 修改为 Mu
+	s.Mu.Lock()
+	defer s.Mu.Unlock()
 	if es, ok := s.EngineStatuses[nodeID]; ok {
 		es.Status = status
 		es.ErrorMessage = errMsg

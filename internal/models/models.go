@@ -52,6 +52,14 @@ const (
 	StatusError    = "error"
 )
 
+// IP版本偏好
+const (
+	IPVersionAuto = 0 // 自动检测（双栈优先）
+	IPVersionIPv4 = 1 // 仅IPv4
+	IPVersionIPv6 = 2 // 仅IPv6
+	IPVersionDual = 3 // 强制双栈
+)
+
 // =============================================================================
 // 核心数据结构
 // =============================================================================
@@ -59,7 +67,7 @@ const (
 // RoutingRule 单条分流规则
 type RoutingRule struct {
 	ID     string `json:"id"`     // 唯一ID (UUID)
-	Type   string `json:"type"`   // 类型: "", "domain:", "regexp:", "geosite:", "geoip:"
+	Type   string `json:"type"`   // 类型: "", "domain:", "regexp:", "geosite:", "geoip:", "ip:", "ip-cidr:"
 	Match  string `json:"match"`  // 匹配内容
 	Target string `json:"target"` // 目标节点
 }
@@ -71,13 +79,13 @@ type NodeConfig struct {
 	Name string `json:"name"` // 节点别名
 
 	// 连接配置
-	Listen     string `json:"listen"`      // 本地监听地址 (如 127.0.0.1:10808)
-	Server     string `json:"server"`      // 服务器地址池 (多个用换行或分号分隔)
-	IP         string `json:"ip"`          // 全局指定IP
+	Listen     string `json:"listen"`      // 本地监听地址 (如 127.0.0.1:10808 或 [::1]:10808)
+	Server     string `json:"server"`      // 服务器地址池 (多个用换行或分号分隔，支持IPv6)
+	IP         string `json:"ip"`          // 全局指定IP (支持IPv4/IPv6)
 	Token      string `json:"token"`       // 认证Token
 	SecretKey  string `json:"secret_key"`  // 加密密钥
-	FallbackIP string `json:"fallback_ip"` // 回源IP
-	Socks5     string `json:"socks5"`      // 上游SOCKS5代理
+	FallbackIP string `json:"fallback_ip"` // 回源IP (支持IPv4/IPv6)
+	Socks5     string `json:"socks5"`      // 上游SOCKS5代理 (支持IPv6格式 [::1]:1080)
 
 	// 路由与策略
 	RoutingMode  int `json:"routing_mode"`  // 路由模式
@@ -85,8 +93,14 @@ type NodeConfig struct {
 
 	// DNS 防泄露配置
 	DNSMode        int    `json:"dns_mode"`        // DNS模式
-	CustomDNS      string `json:"custom_dns"`      // 自定义DNS服务器
+	CustomDNS      string `json:"custom_dns"`      // 自定义DNS服务器 (支持IPv6)
 	EnableSniffing bool   `json:"enable_sniffing"` // 启用流量嗅探
+
+	// IPv6 相关配置
+	EnableIPv6  bool `json:"enable_ipv6"`  // 启用IPv6支持（双栈）
+	PreferIPv6  bool `json:"prefer_ipv6"`  // 优先使用IPv6（DNS查询和连接）
+	DisableIPv6 bool `json:"disable_ipv6"` // 禁用IPv6（仅使用IPv4）
+	IPv6Only    bool `json:"ipv6_only"`    // 仅使用IPv6（禁用IPv4）
 
 	// 分流规则
 	Rules []RoutingRule `json:"rules"`
@@ -110,6 +124,11 @@ type AppConfig struct {
 	// DNS 全局设置
 	GlobalDNSMode    int    `json:"global_dns_mode"`    // 全局DNS模式
 	TUNInterfaceName string `json:"tun_interface_name"` // TUN网卡名称
+
+	// IPv6 全局设置
+	GlobalEnableIPv6  bool `json:"global_enable_ipv6"`  // 全局启用IPv6
+	GlobalPreferIPv6  bool `json:"global_prefer_ipv6"`  // 全局优先IPv6
+	GlobalDisableIPv6 bool `json:"global_disable_ipv6"` // 全局禁用IPv6
 
 	// 🚀【核心新增】记录上次运行的节点 ID，实现自动恢复
 	LastRunningNodeID string `json:"last_running_node_id"`
@@ -152,9 +171,10 @@ type LogFilter struct {
 
 // PingResult 延迟测试结果
 type PingResult struct {
-	Server  string `json:"server"`
-	Latency int    `json:"latency"` // 毫秒, -1 表示失败
-	Error   string `json:"error,omitempty"`
+	Server    string `json:"server"`
+	Latency   int    `json:"latency"` // 毫秒, -1 表示失败
+	Error     string `json:"error,omitempty"`
+	IPVersion string `json:"ip_version,omitempty"` // "ipv4", "ipv6", "unknown"
 }
 
 // PingStatus Ping状态
@@ -164,6 +184,15 @@ type PingStatus struct {
 	StartTime   string `json:"start_time"`
 	TestedCount int    `json:"tested_count"`
 	TotalCount  int    `json:"total_count"`
+}
+
+// IPv6SupportStatus IPv6支持状态
+type IPv6SupportStatus struct {
+	HasIPv6Interface bool     `json:"has_ipv6_interface"` // 是否有IPv6网卡
+	HasIPv6Address   bool     `json:"has_ipv6_address"`   // 是否有IPv6地址
+	HasIPv6Gateway   bool     `json:"has_ipv6_gateway"`   // 是否有IPv6网关
+	IPv6Connectivity bool     `json:"ipv6_connectivity"`  // IPv6是否可达外网
+	IPv6Addresses    []string `json:"ipv6_addresses"`     // 本机IPv6地址列表
 }
 
 // =============================================================================
@@ -181,6 +210,7 @@ const (
 	EventPingBatchProgress EventType = "ping:batch:progress"
 	EventPingBatchComplete EventType = "ping:batch:complete"
 	EventConfigChanged     EventType = "config:changed"
+	EventIPv6StatusChanged EventType = "ipv6:status:changed"
 )
 
 // Event 前后端事件结构
@@ -200,21 +230,26 @@ type AppState struct {
 	EngineStatuses map[string]*EngineStatus // key: NodeID
 	CurrentNodeID  string
 	ExeDir         string
-	IsAutoStart    bool // 是否由开机自启触发
+	IsAutoStart    bool              // 是否由开机自启触发
+	IPv6Status     *IPv6SupportStatus // IPv6支持状态缓存
 }
 
 // NewAppState 创建新的应用状态
 func NewAppState() *AppState {
 	return &AppState{
 		Config: &AppConfig{
-			Nodes:            make([]NodeConfig, 0),
-			Theme:            "system",
-			Language:         "zh-CN",
-			MinimizeToTray:   true,
-			GlobalDNSMode:    DNSModeFakeIP,
-			TUNInterfaceName: "XlinkTUN",
+			Nodes:             make([]NodeConfig, 0),
+			Theme:             "system",
+			Language:          "zh-CN",
+			MinimizeToTray:    true,
+			GlobalDNSMode:     DNSModeFakeIP,
+			TUNInterfaceName:  "XlinkTUN",
+			GlobalEnableIPv6:  true, // 默认启用IPv6
+			GlobalPreferIPv6:  false,
+			GlobalDisableIPv6: false,
 		},
 		EngineStatuses: make(map[string]*EngineStatus),
+		IPv6Status:     nil,
 	}
 }
 
@@ -263,6 +298,20 @@ func (s *AppState) UpdateNodeStatus(nodeID, status string, errMsg string) {
 	}
 }
 
+// UpdateIPv6Status 更新IPv6状态
+func (s *AppState) UpdateIPv6Status(status *IPv6SupportStatus) {
+	s.Mu.Lock()
+	defer s.Mu.Unlock()
+	s.IPv6Status = status
+}
+
+// GetIPv6Status 获取IPv6状态
+func (s *AppState) GetIPv6Status() *IPv6SupportStatus {
+	s.Mu.RLock()
+	defer s.Mu.RUnlock()
+	return s.IPv6Status
+}
+
 // =============================================================================
 // 工具函数
 // =============================================================================
@@ -280,9 +329,31 @@ func NewDefaultNode(name string) NodeConfig {
 		StrategyMode:   StrategyRandom,
 		DNSMode:        DNSModeFakeIP,
 		EnableSniffing: true,
+		EnableIPv6:     true,  // 默认启用IPv6
+		PreferIPv6:     false, // 默认不优先IPv6
+		DisableIPv6:    false, // 默认不禁用IPv6
+		IPv6Only:       false, // 默认不仅限IPv6
 		Rules:          make([]RoutingRule, 0),
 		Status:         StatusStopped,
 	}
+}
+
+// NewDefaultNodeIPv4Only 创建仅IPv4的默认节点配置
+func NewDefaultNodeIPv4Only(name string) NodeConfig {
+	node := NewDefaultNode(name)
+	node.EnableIPv6 = false
+	node.DisableIPv6 = true
+	return node
+}
+
+// NewDefaultNodeIPv6Only 创建仅IPv6的默认节点配置
+func NewDefaultNodeIPv6Only(name string) NodeConfig {
+	node := NewDefaultNode(name)
+	node.Listen = "[::1]:10808" // IPv6本地监听
+	node.EnableIPv6 = true
+	node.IPv6Only = true
+	node.PreferIPv6 = true
+	return node
 }
 
 // GenerateUUID 生成UUID v4
@@ -329,5 +400,70 @@ func GetDNSModeString(mode int) string {
 		return "TUN 全局接管"
 	default:
 		return "标准模式"
+	}
+}
+
+// GetIPVersionString 获取IP版本描述
+func GetIPVersionString(node *NodeConfig) string {
+	if node.IPv6Only {
+		return "仅IPv6"
+	}
+	if node.DisableIPv6 {
+		return "仅IPv4"
+	}
+	if node.PreferIPv6 {
+		return "双栈(IPv6优先)"
+	}
+	if node.EnableIPv6 {
+		return "双栈(IPv4优先)"
+	}
+	return "仅IPv4"
+}
+
+// GetEffectiveIPVersion 获取节点实际生效的IP版本
+func GetEffectiveIPVersion(node *NodeConfig) int {
+	if node.IPv6Only {
+		return IPVersionIPv6
+	}
+	if node.DisableIPv6 {
+		return IPVersionIPv4
+	}
+	if node.EnableIPv6 {
+		return IPVersionDual
+	}
+	return IPVersionIPv4
+}
+
+// ValidateIPv6Config 验证IPv6配置是否有效
+func ValidateIPv6Config(node *NodeConfig) error {
+	// 互斥检查
+	if node.DisableIPv6 && node.IPv6Only {
+		return fmt.Errorf("DisableIPv6 和 IPv6Only 不能同时启用")
+	}
+	if node.DisableIPv6 && node.PreferIPv6 {
+		return fmt.Errorf("DisableIPv6 和 PreferIPv6 不能同时启用")
+	}
+	if node.DisableIPv6 && node.EnableIPv6 {
+		return fmt.Errorf("DisableIPv6 和 EnableIPv6 不能同时启用")
+	}
+	if node.IPv6Only && !node.EnableIPv6 {
+		// 自动修正：IPv6Only 必须启用 EnableIPv6
+		node.EnableIPv6 = true
+	}
+	return nil
+}
+
+// ApplyGlobalIPv6Settings 应用全局IPv6设置到节点
+func ApplyGlobalIPv6Settings(node *NodeConfig, config *AppConfig) {
+	// 如果节点没有明确设置，使用全局设置
+	// 这里的逻辑是：节点设置优先于全局设置
+	
+	// 只有当节点的IPv6相关字段都是默认值时，才应用全局设置
+	isDefault := !node.EnableIPv6 && !node.PreferIPv6 && !node.DisableIPv6 && !node.IPv6Only
+	
+	if isDefault {
+		node.EnableIPv6 = config.GlobalEnableIPv6
+		node.PreferIPv6 = config.GlobalPreferIPv6
+		node.DisableIPv6 = config.GlobalDisableIPv6
 	}
 }

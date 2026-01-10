@@ -6,7 +6,6 @@ import (
 	"runtime"
 	"strings"
 	"syscall"
-	"unsafe"
 )
 
 // =============================================================================
@@ -100,18 +99,18 @@ var (
 	procInternetSetOption = modwininet.NewProc("InternetSetOptionW")
 )
 
-// refreshSystemProxy 通知系统刷新代理设置 (核心修复)
+// refreshSystemProxy 通知系统刷新代理设置
 func refreshSystemProxy() {
 	// INTERNET_OPTION_SETTINGS_CHANGED = 39
 	// INTERNET_OPTION_REFRESH = 37
+	// Call 接收 uintptr 类型参数，0 会自动转换
 	procInternetSetOption.Call(0, 39, 0, 0)
 	procInternetSetOption.Call(0, 37, 0, 0)
 }
 
 func (p *ProxyManager) setWindowsProxy(server string, port int) error {
-	// ⚠️【核心修复】添加 socks= 前缀
-	// 因为 Xlink/Xray 默认监听的是 SOCKS5 端口
-	// 如果不加这个前缀，Windows 会默认使用 HTTP 协议去连接 SOCKS 端口，导致节点不通
+	// ⚠️【核心逻辑】添加 socks= 前缀
+	// 强制 Windows 使用 SOCKS 协议连接本地端口
 	proxyServer := fmt.Sprintf("socks=%s:%d", server, port)
 
 	// 1. 设置代理服务器地址
@@ -139,7 +138,7 @@ func (p *ProxyManager) setWindowsProxy(server string, port int) error {
 		return err
 	}
 
-	// 4. ⚠️【核心修复】通知系统立即刷新设置
+	// 4. 通知系统立即刷新
 	refreshSystemProxy()
 	return nil
 }
@@ -198,7 +197,7 @@ func (p *ProxyManager) getWindowsProxy() (*ProxySettings, error) {
 }
 
 // =============================================================================
-// macOS 实现 (保持不变，macOS 的 networksetup 命令自带刷新)
+// macOS 实现 (保持不变)
 // =============================================================================
 
 func (p *ProxyManager) setMacOSProxy(server string, port int) error {
@@ -208,11 +207,8 @@ func (p *ProxyManager) setMacOSProxy(server string, port int) error {
 	}
 
 	for _, service := range services {
-		// 设置 SOCKS 代理 (Xlink 是 SOCKS5)
 		cmd := exec.Command("networksetup", "-setsocksfirewallproxy", service, server, fmt.Sprintf("%d", port))
 		cmd.Run()
-
-		// 启用
 		cmd = exec.Command("networksetup", "-setsocksfirewallproxystate", service, "on")
 		cmd.Run()
 	}
@@ -254,15 +250,12 @@ func (p *ProxyManager) getMacOSProxy() (*ProxySettings, error) {
 }
 
 // =============================================================================
-// Linux 实现 (GNOME/Settings)
+// Linux 实现 (保持不变)
 // =============================================================================
 
 func (p *ProxyManager) setLinuxProxy(server string, port int) error {
-	// 设置 GNOME 代理为 Manual
 	exec.Command("gsettings", "set", "org.gnome.system.proxy", "mode", "manual").Run()
-	// 设置 SOCKS 主机
 	exec.Command("gsettings", "set", "org.gnome.system.proxy.socks", "host", server).Run()
-	// 设置 SOCKS 端口
 	exec.Command("gsettings", "set", "org.gnome.system.proxy.socks", "port", fmt.Sprintf("%d", port)).Run()
 	return nil
 }
